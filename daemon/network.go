@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"github.com/containerd/log"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -211,7 +210,7 @@ func (daemon *Daemon) setupIngress(cfg *config.Config, create *clustertypes.Netw
 		daemon.releaseIngress(staleID)
 	}
 
-	if _, err := daemon.createNetwork(cfg, create.NetworkCreateRequest, create.ID, true); err != nil {
+	if _, err := daemon.createNetwork(cfg, create.CreateRequest, create.ID, true); err != nil {
 		// If it is any other error other than already
 		// exists error log error and return.
 		if _, ok := err.(libnetwork.NetworkNameError); !ok {
@@ -281,16 +280,16 @@ func (daemon *Daemon) WaitForDetachment(ctx context.Context, networkName, networ
 
 // CreateManagedNetwork creates an agent network.
 func (daemon *Daemon) CreateManagedNetwork(create clustertypes.NetworkCreateRequest) error {
-	_, err := daemon.createNetwork(&daemon.config().Config, create.NetworkCreateRequest, create.ID, true)
+	_, err := daemon.createNetwork(&daemon.config().Config, create.CreateRequest, create.ID, true)
 	return err
 }
 
 // CreateNetwork creates a network with the given name, driver and other optional parameters
-func (daemon *Daemon) CreateNetwork(create types.NetworkCreateRequest) (*network.CreateResponse, error) {
+func (daemon *Daemon) CreateNetwork(create network.CreateRequest) (*network.CreateResponse, error) {
 	return daemon.createNetwork(&daemon.config().Config, create, "", false)
 }
 
-func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCreateRequest, id string, agent bool) (*network.CreateResponse, error) {
+func (daemon *Daemon) createNetwork(cfg *config.Config, create network.CreateRequest, id string, agent bool) (*network.CreateResponse, error) {
 	if runconfig.IsPreDefinedNetwork(create.Name) {
 		return nil, PredefinedNetworkError(create.Name)
 	}
@@ -318,8 +317,19 @@ func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCrea
 		}
 	}
 
+	var enableIPv6 bool
+	if create.EnableIPv6 != nil {
+		enableIPv6 = *create.EnableIPv6
+	} else {
+		var err error
+		v, ok := networkOptions[netlabel.EnableIPv6]
+		if enableIPv6, err = strconv.ParseBool(v); ok && err != nil {
+			return nil, errdefs.InvalidParameter(fmt.Errorf("driver-opt %q is not a valid bool", netlabel.EnableIPv6))
+		}
+	}
+
 	nwOptions := []libnetwork.NetworkOption{
-		libnetwork.NetworkOptionEnableIPv6(create.EnableIPv6),
+		libnetwork.NetworkOptionEnableIPv6(enableIPv6),
 		libnetwork.NetworkOptionDriverOpts(networkOptions),
 		libnetwork.NetworkOptionLabels(create.Labels),
 		libnetwork.NetworkOptionAttachable(create.Attachable),
@@ -331,7 +341,7 @@ func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCrea
 		nwOptions = append(nwOptions, libnetwork.NetworkOptionConfigOnly())
 	}
 
-	if err := network.ValidateIPAM(create.IPAM, create.EnableIPv6); err != nil {
+	if err := network.ValidateIPAM(create.IPAM, enableIPv6); err != nil {
 		if agent {
 			// This function is called with agent=false for all networks. For swarm-scoped
 			// networks, the configuration is validated but ManagerRedirectError is returned
@@ -565,14 +575,14 @@ func (daemon *Daemon) deleteNetwork(nw *libnetwork.Network, dynamic bool) error 
 }
 
 // GetNetworks returns a list of all networks
-func (daemon *Daemon) GetNetworks(filter filters.Args, config backend.NetworkListConfig) (networks []types.NetworkResource, err error) {
+func (daemon *Daemon) GetNetworks(filter filters.Args, config backend.NetworkListConfig) (networks []network.Inspect, err error) {
 	var idx map[string]*libnetwork.Network
 	if config.Detailed {
 		idx = make(map[string]*libnetwork.Network)
 	}
 
 	allNetworks := daemon.getAllNetworks()
-	networks = make([]types.NetworkResource, 0, len(allNetworks))
+	networks = make([]network.Inspect, 0, len(allNetworks))
 	for _, n := range allNetworks {
 		nr := buildNetworkResource(n)
 		networks = append(networks, nr)
@@ -600,12 +610,12 @@ func (daemon *Daemon) GetNetworks(filter filters.Args, config backend.NetworkLis
 
 // buildNetworkResource builds a [types.NetworkResource] from the given
 // [libnetwork.Network], to be returned by the API.
-func buildNetworkResource(nw *libnetwork.Network) types.NetworkResource {
+func buildNetworkResource(nw *libnetwork.Network) network.Inspect {
 	if nw == nil {
-		return types.NetworkResource{}
+		return network.Inspect{}
 	}
 
-	return types.NetworkResource{
+	return network.Inspect{
 		Name:       nw.Name(),
 		ID:         nw.ID(),
 		Created:    nw.Created(),
@@ -868,7 +878,8 @@ func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, e
 		createOptions = append(createOptions, libnetwork.CreateOptionService(svcCfg.Name, svcCfg.ID, vip, portConfigs, svcCfg.Aliases[nwID]))
 	}
 
-	if !containertypes.NetworkMode(nwName).IsUserDefined() {
+	// Don't run an internal DNS resolver for host/container/none networks.
+	if nm := containertypes.NetworkMode(nwName); nm.IsHost() || nm.IsContainer() || nm.IsNone() {
 		createOptions = append(createOptions, libnetwork.CreateOptionDisableResolution())
 	}
 

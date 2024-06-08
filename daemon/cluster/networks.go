@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/containerd/log"
-	apitypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	types "github.com/docker/docker/api/types/swarm"
@@ -19,7 +18,7 @@ import (
 )
 
 // GetNetworks returns all current cluster managed networks.
-func (c *Cluster) GetNetworks(filter filters.Args) ([]apitypes.NetworkResource, error) {
+func (c *Cluster) GetNetworks(filter filters.Args) ([]network.Inspect, error) {
 	var f *swarmapi.ListNetworksRequest_Filters
 
 	if filter.Len() > 0 {
@@ -44,13 +43,13 @@ func (c *Cluster) GetNetworks(filter filters.Args) ([]apitypes.NetworkResource, 
 	return internalnetwork.FilterNetworks(list, filter)
 }
 
-func filterPredefinedNetworks(networks *[]apitypes.NetworkResource) {
+func filterPredefinedNetworks(networks *[]network.Inspect) {
 	if networks == nil {
 		return
 	}
 	var idxs []int
-	for i, n := range *networks {
-		if v, ok := n.Labels["com.docker.swarm.predefined"]; ok && v == "true" {
+	for i, nw := range *networks {
+		if v, ok := nw.Labels["com.docker.swarm.predefined"]; ok && v == "true" {
 			idxs = append(idxs, i)
 		}
 	}
@@ -60,7 +59,7 @@ func filterPredefinedNetworks(networks *[]apitypes.NetworkResource) {
 	}
 }
 
-func (c *Cluster) getNetworks(filters *swarmapi.ListNetworksRequest_Filters) ([]apitypes.NetworkResource, error) {
+func (c *Cluster) getNetworks(filters *swarmapi.ListNetworksRequest_Filters) ([]network.Inspect, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -70,7 +69,7 @@ func (c *Cluster) getNetworks(filters *swarmapi.ListNetworksRequest_Filters) ([]
 	}
 
 	ctx := context.TODO()
-	ctx, cancel := c.getRequestContext(ctx)
+	ctx, cancel := context.WithTimeout(ctx, swarmRequestTimeout)
 	defer cancel()
 
 	r, err := state.controlClient.ListNetworks(ctx, &swarmapi.ListNetworksRequest{Filters: filters})
@@ -78,35 +77,35 @@ func (c *Cluster) getNetworks(filters *swarmapi.ListNetworksRequest_Filters) ([]
 		return nil, err
 	}
 
-	networks := make([]apitypes.NetworkResource, 0, len(r.Networks))
+	networks := make([]network.Inspect, 0, len(r.Networks))
 
-	for _, network := range r.Networks {
-		networks = append(networks, convert.BasicNetworkFromGRPC(*network))
+	for _, nw := range r.Networks {
+		networks = append(networks, convert.BasicNetworkFromGRPC(*nw))
 	}
 
 	return networks, nil
 }
 
 // GetNetwork returns a cluster network by an ID.
-func (c *Cluster) GetNetwork(input string) (apitypes.NetworkResource, error) {
-	var network *swarmapi.Network
+func (c *Cluster) GetNetwork(input string) (network.Inspect, error) {
+	var nw *swarmapi.Network
 
 	if err := c.lockedManagerAction(func(ctx context.Context, state nodeState) error {
 		n, err := getNetwork(ctx, state.controlClient, input)
 		if err != nil {
 			return err
 		}
-		network = n
+		nw = n
 		return nil
 	}); err != nil {
-		return apitypes.NetworkResource{}, err
+		return network.Inspect{}, err
 	}
-	return convert.BasicNetworkFromGRPC(*network), nil
+	return convert.BasicNetworkFromGRPC(*nw), nil
 }
 
 // GetNetworksByName returns cluster managed networks by name.
 // It is ok to have multiple networks here. #18864
-func (c *Cluster) GetNetworksByName(name string) ([]apitypes.NetworkResource, error) {
+func (c *Cluster) GetNetworksByName(name string) ([]network.Inspect, error) {
 	// Note that swarmapi.GetNetworkRequest.Name is not functional.
 	// So we cannot just use that with c.GetNetwork.
 	return c.getNetworks(&swarmapi.ListNetworksRequest_Filters{
@@ -206,7 +205,7 @@ func (c *Cluster) AttachNetwork(target string, containerID string, addresses []s
 	c.mu.Unlock()
 
 	ctx := context.TODO()
-	ctx, cancel := c.getRequestContext(ctx)
+	ctx, cancel := context.WithTimeout(ctx, swarmRequestTimeout)
 	defer cancel()
 
 	taskID, err := agent.ResourceAllocator().AttachNetwork(ctx, containerID, target, addresses)
@@ -226,7 +225,7 @@ func (c *Cluster) AttachNetwork(target string, containerID string, addresses []s
 
 	release := func() {
 		ctx := compatcontext.WithoutCancel(ctx)
-		ctx, cancel := c.getRequestContext(ctx)
+		ctx, cancel := context.WithTimeout(ctx, swarmRequestTimeout)
 		defer cancel()
 		if err := agent.ResourceAllocator().DetachNetwork(ctx, taskID); err != nil {
 			log.G(ctx).Errorf("Failed remove network attachment %s to network %s on allocation failure: %v",
@@ -270,7 +269,7 @@ func (c *Cluster) DetachNetwork(target string, containerID string) error {
 }
 
 // CreateNetwork creates a new cluster managed network.
-func (c *Cluster) CreateNetwork(s apitypes.NetworkCreateRequest) (string, error) {
+func (c *Cluster) CreateNetwork(s network.CreateRequest) (string, error) {
 	if runconfig.IsPreDefinedNetwork(s.Name) {
 		err := notAllowedError(fmt.Sprintf("%s is a pre-defined network and cannot be created", s.Name))
 		return "", errors.WithStack(err)
@@ -295,12 +294,12 @@ func (c *Cluster) CreateNetwork(s apitypes.NetworkCreateRequest) (string, error)
 // RemoveNetwork removes a cluster network.
 func (c *Cluster) RemoveNetwork(input string) error {
 	return c.lockedManagerAction(func(ctx context.Context, state nodeState) error {
-		network, err := getNetwork(ctx, state.controlClient, input)
+		nw, err := getNetwork(ctx, state.controlClient, input)
 		if err != nil {
 			return err
 		}
 
-		_, err = state.controlClient.RemoveNetwork(ctx, &swarmapi.RemoveNetworkRequest{NetworkID: network.ID})
+		_, err = state.controlClient.RemoveNetwork(ctx, &swarmapi.RemoveNetworkRequest{NetworkID: nw.ID})
 		return err
 	})
 }
@@ -312,10 +311,10 @@ func (c *Cluster) populateNetworkID(ctx context.Context, client swarmapi.Control
 	if len(networks) == 0 {
 		networks = s.Networks //nolint:staticcheck // ignore SA1019: field is deprecated.
 	}
-	for i, n := range networks {
-		apiNetwork, err := getNetwork(ctx, client, n.Target)
+	for i, nw := range networks {
+		apiNetwork, err := getNetwork(ctx, client, nw.Target)
 		if err != nil {
-			ln, _ := c.config.Backend.FindNetwork(n.Target)
+			ln, _ := c.config.Backend.FindNetwork(nw.Target)
 			if ln != nil && runconfig.IsPreDefinedNetwork(ln.Name()) {
 				// Need to retrieve the corresponding predefined swarm network
 				// and use its id for the request.

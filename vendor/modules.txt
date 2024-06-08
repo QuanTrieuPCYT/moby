@@ -261,7 +261,7 @@ github.com/containerd/cgroups/v3/cgroup2/stats
 # github.com/containerd/console v1.0.4
 ## explicit; go 1.13
 github.com/containerd/console
-# github.com/containerd/containerd v1.7.17
+# github.com/containerd/containerd v1.7.18
 ## explicit; go 1.21
 github.com/containerd/containerd
 github.com/containerd/containerd/api/events
@@ -311,7 +311,6 @@ github.com/containerd/containerd/images/converter
 github.com/containerd/containerd/labels
 github.com/containerd/containerd/leases
 github.com/containerd/containerd/leases/proxy
-github.com/containerd/containerd/log
 github.com/containerd/containerd/metadata
 github.com/containerd/containerd/metadata/boltutil
 github.com/containerd/containerd/mount
@@ -374,6 +373,9 @@ github.com/containerd/continuity/devices
 github.com/containerd/continuity/driver
 github.com/containerd/continuity/fs
 github.com/containerd/continuity/sysx
+# github.com/containerd/errdefs v0.1.0
+## explicit; go 1.20
+github.com/containerd/errdefs
 # github.com/containerd/fifo v1.1.0
 ## explicit; go 1.18
 github.com/containerd/fifo
@@ -710,7 +712,7 @@ github.com/mitchellh/hashstructure/v2
 # github.com/mitchellh/reflectwalk v1.0.2
 ## explicit
 github.com/mitchellh/reflectwalk
-# github.com/moby/buildkit v0.13.1
+# github.com/moby/buildkit v0.14.0-rc2
 ## explicit; go 1.21
 github.com/moby/buildkit/api/services/control
 github.com/moby/buildkit/api/types
@@ -750,6 +752,7 @@ github.com/moby/buildkit/exporter/local
 github.com/moby/buildkit/exporter/oci
 github.com/moby/buildkit/exporter/tar
 github.com/moby/buildkit/exporter/util/epoch
+github.com/moby/buildkit/exporter/verifier
 github.com/moby/buildkit/frontend
 github.com/moby/buildkit/frontend/attestations
 github.com/moby/buildkit/frontend/attestations/sbom
@@ -757,6 +760,7 @@ github.com/moby/buildkit/frontend/dockerfile/builder
 github.com/moby/buildkit/frontend/dockerfile/command
 github.com/moby/buildkit/frontend/dockerfile/dockerfile2llb
 github.com/moby/buildkit/frontend/dockerfile/instructions
+github.com/moby/buildkit/frontend/dockerfile/linter
 github.com/moby/buildkit/frontend/dockerfile/parser
 github.com/moby/buildkit/frontend/dockerfile/shell
 github.com/moby/buildkit/frontend/dockerui
@@ -767,6 +771,7 @@ github.com/moby/buildkit/frontend/gateway/forwarder
 github.com/moby/buildkit/frontend/gateway/grpcclient
 github.com/moby/buildkit/frontend/gateway/pb
 github.com/moby/buildkit/frontend/subrequests
+github.com/moby/buildkit/frontend/subrequests/lint
 github.com/moby/buildkit/frontend/subrequests/outline
 github.com/moby/buildkit/frontend/subrequests/targets
 github.com/moby/buildkit/identity
@@ -1087,12 +1092,12 @@ github.com/syndtr/gocapability/capability
 # github.com/tinylib/msgp v1.1.8
 ## explicit; go 1.15
 github.com/tinylib/msgp/msgp
-# github.com/tonistiigi/fsutil v0.0.0-20240301111122-7525a1af2bb5
+# github.com/tonistiigi/fsutil v0.0.0-20240424095704-91a3fc46842c
 ## explicit; go 1.20
 github.com/tonistiigi/fsutil
 github.com/tonistiigi/fsutil/copy
 github.com/tonistiigi/fsutil/types
-# github.com/tonistiigi/go-actions-cache v0.0.0-20240227172821-a0b64f338598
+# github.com/tonistiigi/go-actions-cache v0.0.0-20240320205438-9794bdbb2fb4
 ## explicit; go 1.20
 github.com/tonistiigi/go-actions-cache
 # github.com/tonistiigi/go-archvariant v1.0.0
@@ -1101,7 +1106,7 @@ github.com/tonistiigi/go-archvariant
 # github.com/tonistiigi/units v0.0.0-20180711220420-6950e57a87ea
 ## explicit
 github.com/tonistiigi/units
-# github.com/tonistiigi/vt100 v0.0.0-20230623042737-f9a4f7ef6531
+# github.com/tonistiigi/vt100 v0.0.0-20240514184818-90bafcd6abab
 ## explicit; go 1.12
 github.com/tonistiigi/vt100
 # github.com/vbatts/tar-split v0.11.5
@@ -1246,9 +1251,6 @@ go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal
 go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/envconfig
 go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/otlpconfig
 go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/retry
-# go.opentelemetry.io/otel/exporters/prometheus v0.42.0
-## explicit; go 1.20
-go.opentelemetry.io/otel/exporters/prometheus
 # go.opentelemetry.io/otel/metric v1.21.0
 ## explicit; go 1.20
 go.opentelemetry.io/otel/metric
@@ -1417,7 +1419,7 @@ google.golang.org/api/support/bundler
 google.golang.org/api/transport/grpc
 google.golang.org/api/transport/http
 google.golang.org/api/transport/http/internal/propagation
-# google.golang.org/appengine v1.6.7
+# google.golang.org/appengine v1.6.8
 ## explicit; go 1.11
 google.golang.org/appengine
 google.golang.org/appengine/internal
