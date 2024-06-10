@@ -151,7 +151,7 @@ func (s *DockerAPISuite) TestGetContainerStats(c *testing.T) {
 	runSleepingContainer(c, "--name", name)
 
 	type b struct {
-		stats types.ContainerStats
+		stats container.StatsResponse
 		err   error
 	}
 
@@ -255,7 +255,7 @@ func (s *DockerAPISuite) TestGetContainerStatsStream(c *testing.T) {
 	runSleepingContainer(c, "--name", name)
 
 	type b struct {
-		stats types.ContainerStats
+		stats container.StatsResponse
 		err   error
 	}
 
@@ -296,7 +296,7 @@ func (s *DockerAPISuite) TestGetContainerStatsNoStream(c *testing.T) {
 	runSleepingContainer(c, "--name", name)
 
 	type b struct {
-		stats types.ContainerStats
+		stats container.StatsResponse
 		err   error
 	}
 
@@ -945,19 +945,6 @@ func (s *DockerAPISuite) TestContainerAPIWait(c *testing.T) {
 	}
 }
 
-func (s *DockerAPISuite) TestContainerAPICopyNotExistsAnyMore(c *testing.T) {
-	const name = "test-container-api-copy"
-	cli.DockerCmd(c, "run", "--name", name, "busybox", "touch", "/test.txt")
-
-	postData := types.CopyConfig{
-		Resource: "/test.txt",
-	}
-	// no copy in client/
-	res, _, err := request.Post(testutil.GetContext(c), "/containers/"+name+"/copy", request.JSONBody(postData))
-	assert.NilError(c, err)
-	assert.Equal(c, res.StatusCode, http.StatusNotFound)
-}
-
 func (s *DockerAPISuite) TestContainerAPIDelete(c *testing.T) {
 	id := runSleepingContainer(c)
 	cli.WaitRun(c, id)
@@ -1201,7 +1188,7 @@ func (s *DockerAPISuite) TestPutContainerArchiveErrSymlinkInVolumeToReadOnlyRoot
 	apiClient, err := client.NewClientWithOpts(client.FromEnv)
 	assert.NilError(c, err)
 
-	err = apiClient.CopyToContainer(testutil.GetContext(c), cID, "/vol2/symlinkToAbsDir", nil, types.CopyToContainerOptions{})
+	err = apiClient.CopyToContainer(testutil.GetContext(c), cID, "/vol2/symlinkToAbsDir", nil, container.CopyToContainerOptions{})
 	assert.ErrorContains(c, err, "container rootfs is marked read-only")
 }
 
@@ -1430,7 +1417,7 @@ func (s *DockerAPISuite) TestContainerAPIStatsWithNetworkDisabled(c *testing.T) 
 	cli.WaitRun(c, name)
 
 	type b struct {
-		stats types.ContainerStats
+		stats container.StatsResponse
 		err   error
 	}
 	bc := make(chan b, 1)
