@@ -99,7 +99,7 @@ func TestRCWrite(t *testing.T) {
 		{
 			name:     "Write perm",
 			fileName: "testfile",
-			perm:     0640,
+			perm:     0o640,
 		},
 	}
 
@@ -116,7 +116,7 @@ func TestRCWrite(t *testing.T) {
 				hashPath = filepath.Join(d, tc.hashFileName)
 			}
 			if tc.perm == 0 {
-				tc.perm = 0644
+				tc.perm = 0o644
 			}
 			err := rc.WriteFile(path, hashPath, tc.perm)
 			assert.NilError(t, err)
@@ -129,7 +129,7 @@ func TestRCWrite(t *testing.T) {
 			}
 
 			if tc.modify {
-				err := os.WriteFile(path, []byte("modified"), 0644)
+				err := os.WriteFile(path, []byte("modified"), 0o644)
 				assert.NilError(t, err)
 			}
 
@@ -140,8 +140,10 @@ func TestRCWrite(t *testing.T) {
 	}
 }
 
-var a2s = sliceutil.Mapper(netip.Addr.String)
-var s2a = sliceutil.Mapper(netip.MustParseAddr)
+var (
+	a2s = sliceutil.Mapper(netip.Addr.String)
+	s2a = sliceutil.Mapper(netip.MustParseAddr)
+)
 
 // Test that a resolv.conf file can be modified using OverrideXXX() methods
 // to modify nameservers/search/options directives, and tha options can be
@@ -234,7 +236,7 @@ func TestRCModify(t *testing.T) {
 
 			d := t.TempDir()
 			path := filepath.Join(d, "resolv.conf")
-			err = rc.WriteFile(path, "", 0644)
+			err = rc.WriteFile(path, "", 0o644)
 			assert.NilError(t, err)
 
 			content, err := os.ReadFile(path)
@@ -316,7 +318,7 @@ func TestRCTransformForLegacyNw(t *testing.T) {
 
 			d := t.TempDir()
 			path := filepath.Join(d, "resolv.conf")
-			err = rc.WriteFile(path, "", 0644)
+			err = rc.WriteFile(path, "", 0o644)
 			assert.NilError(t, err)
 
 			content, err := os.ReadFile(path)
@@ -338,7 +340,6 @@ func TestRCTransformForIntNS(t *testing.T) {
 		name            string
 		input           string
 		intNameServer   string
-		ipv6            bool
 		overrideNS      []string
 		overrideOptions []string
 		reqdOptions     []string
@@ -348,30 +349,19 @@ func TestRCTransformForIntNS(t *testing.T) {
 		{
 			name:          "IPv4 only",
 			input:         "nameserver 10.0.0.1",
-			expExtServers: []ExtDNSEntry{mke("10.0.0.1", false)},
+			expExtServers: []ExtDNSEntry{mke("10.0.0.1", true)},
 		},
 		{
 			name:  "IPv4 and IPv6, ipv6 enabled",
 			input: "nameserver 10.0.0.1\nnameserver fdb6:b8fe:b528::1",
-			ipv6:  true,
 			expExtServers: []ExtDNSEntry{
-				mke("10.0.0.1", false),
-				mke("fdb6:b8fe:b528::1", false),
-			},
-		},
-		{
-			name:  "IPv4 and IPv6, ipv6 disabled",
-			input: "nameserver 10.0.0.1\nnameserver fdb6:b8fe:b528::1",
-			ipv6:  false,
-			expExtServers: []ExtDNSEntry{
-				mke("10.0.0.1", false),
+				mke("10.0.0.1", true),
 				mke("fdb6:b8fe:b528::1", true),
 			},
 		},
 		{
 			name:          "IPv4 localhost",
 			input:         "nameserver 127.0.0.53",
-			ipv6:          false,
 			expExtServers: []ExtDNSEntry{mke("127.0.0.53", true)},
 		},
 		{
@@ -379,62 +369,21 @@ func TestRCTransformForIntNS(t *testing.T) {
 			// loopback interface, not the host's.
 			name:          "IPv4 localhost override",
 			input:         "nameserver 10.0.0.1",
-			ipv6:          false,
 			overrideNS:    []string{"127.0.0.53"},
 			expExtServers: []ExtDNSEntry{mke("127.0.0.53", false)},
 		},
 		{
-			name:          "IPv4 localhost, ipv6 enabled",
-			input:         "nameserver 127.0.0.53",
-			ipv6:          true,
-			expExtServers: []ExtDNSEntry{mke("127.0.0.53", true)},
-		},
-		{
-			name:          "IPv6 addr, IPv6 enabled",
+			name:          "IPv6 only",
 			input:         "nameserver fd14:6e0e:f855::1",
-			ipv6:          true,
-			expExtServers: []ExtDNSEntry{mke("fd14:6e0e:f855::1", false)},
+			expExtServers: []ExtDNSEntry{mke("fd14:6e0e:f855::1", true)},
 		},
 		{
-			name:  "IPv4 and IPv6 localhost, IPv6 disabled",
+			name:  "IPv4 and IPv6 localhost",
 			input: "nameserver 127.0.0.53\nnameserver ::1",
-			ipv6:  false,
 			expExtServers: []ExtDNSEntry{
 				mke("127.0.0.53", true),
 				mke("::1", true),
 			},
-		},
-		{
-			name:  "IPv4 and IPv6 localhost, ipv6 enabled",
-			input: "nameserver 127.0.0.53\nnameserver ::1",
-			ipv6:  true,
-			expExtServers: []ExtDNSEntry{
-				mke("127.0.0.53", true),
-				mke("::1", true),
-			},
-		},
-		{
-			name:  "IPv4 localhost, IPv6 private, IPv6 enabled",
-			input: "nameserver 127.0.0.53\nnameserver fd3e:2d1a:1f5a::1",
-			ipv6:  true,
-			expExtServers: []ExtDNSEntry{
-				mke("127.0.0.53", true),
-				mke("fd3e:2d1a:1f5a::1", false),
-			},
-		},
-		{
-			name:  "IPv4 localhost, IPv6 private, IPv6 disabled",
-			input: "nameserver 127.0.0.53\nnameserver fd3e:2d1a:1f5a::1",
-			ipv6:  false,
-			expExtServers: []ExtDNSEntry{
-				mke("127.0.0.53", true),
-				mke("fd3e:2d1a:1f5a::1", true),
-			},
-		},
-		{
-			name:  "No host nameserver",
-			input: "",
-			ipv6:  true,
 		},
 		{
 			name:          "ndots present and required",
@@ -479,7 +428,7 @@ func TestRCTransformForIntNS(t *testing.T) {
 				rc.OverrideOptions(tc.overrideOptions)
 			}
 			intNS := netip.MustParseAddr(tc.intNameServer)
-			extNameServers, err := rc.TransformForIntNS(tc.ipv6, intNS, tc.reqdOptions)
+			extNameServers, err := rc.TransformForIntNS(intNS, tc.reqdOptions)
 			if tc.expErr != "" {
 				assert.Check(t, is.ErrorContains(err, tc.expErr))
 				return
@@ -488,7 +437,7 @@ func TestRCTransformForIntNS(t *testing.T) {
 
 			d := t.TempDir()
 			path := filepath.Join(d, "resolv.conf")
-			err = rc.WriteFile(path, "", 0644)
+			err = rc.WriteFile(path, "", 0o644)
 			assert.NilError(t, err)
 
 			content, err := os.ReadFile(path)
@@ -542,7 +491,7 @@ func TestRCTransformForIntNSInvalidNdots(t *testing.T) {
 			content := "nameserver 8.8.8.8\n" + tc.options
 			rc, err := Parse(bytes.NewBuffer([]byte(content)), "/etc/resolv.conf")
 			assert.NilError(t, err)
-			_, err = rc.TransformForIntNS(false, netip.MustParseAddr("127.0.0.11"), tc.reqdOptions)
+			_, err = rc.TransformForIntNS(netip.MustParseAddr("127.0.0.11"), tc.reqdOptions)
 			assert.NilError(t, err)
 
 			val, found := rc.Option("ndots")
@@ -562,7 +511,7 @@ func TestRCRead(t *testing.T) {
 	_, err := Load(path)
 	assert.Check(t, is.ErrorIs(err, fs.ErrNotExist))
 
-	err = os.WriteFile(path, []byte("options edns0"), 0644)
+	err = os.WriteFile(path, []byte("options edns0"), 0o644)
 	assert.NilError(t, err)
 
 	// Read that file in the constructor.
@@ -587,7 +536,7 @@ func TestRCInvalidNS(t *testing.T) {
 	assert.NilError(t, err)
 
 	path := filepath.Join(d, "resolv.conf")
-	err = rc.WriteFile(path, "", 0644)
+	err = rc.WriteFile(path, "", 0o644)
 	assert.NilError(t, err)
 
 	content, err := os.ReadFile(path)
@@ -602,7 +551,7 @@ func TestRCSetHeader(t *testing.T) {
 	rc.SetHeader("# This is a comment.")
 	d := t.TempDir()
 	path := filepath.Join(d, "resolv.conf")
-	err = rc.WriteFile(path, "", 0644)
+	err = rc.WriteFile(path, "", 0o644)
 	assert.NilError(t, err)
 
 	content, err := os.ReadFile(path)
@@ -622,7 +571,7 @@ unrecognised thing
 
 	d := t.TempDir()
 	path := filepath.Join(d, "resolv.conf")
-	err = rc.WriteFile(path, "", 0644)
+	err = rc.WriteFile(path, "", 0o644)
 	assert.NilError(t, err)
 
 	content, err := os.ReadFile(path)

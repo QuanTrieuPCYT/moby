@@ -2,15 +2,15 @@ package solver
 
 import (
 	"context"
-	"encoding/csv"
 	"os"
-	"strings"
 	"sync"
 
+	"github.com/moby/buildkit/errdefs"
 	"github.com/moby/buildkit/solver/internal/pipe"
 	"github.com/moby/buildkit/util/bklog"
 	"github.com/moby/buildkit/util/cond"
 	"github.com/pkg/errors"
+	"github.com/tonistiigi/go-csvvalue"
 )
 
 var debugScheduler = false // TODO: replace with logs in build trace
@@ -74,7 +74,7 @@ func (s *scheduler) Stop() {
 func (s *scheduler) loop() {
 	debugSchedulerStepsParseOnce.Do(func() {
 		if s := os.Getenv("BUILDKIT_SCHEDULER_DEBUG_STEPS"); s != "" {
-			fields, err := csv.NewReader(strings.NewReader(s)).Read()
+			fields, err := csvvalue.Fields(s, nil)
 			if err != nil {
 				return
 			}
@@ -404,7 +404,7 @@ func (pf *pipeFactory) NewInputRequest(ee Edge, req *edgeRequest) pipe.Receiver 
 			WithField("edge_index", ee.Index).
 			Error("failed to get edge: inconsistent graph state")
 		return pf.NewFuncRequest(func(_ context.Context) (interface{}, error) {
-			return nil, errors.Errorf("failed to get edge: inconsistent graph state in edge %s %s %d", ee.Vertex.Name(), ee.Vertex.Digest(), ee.Index)
+			return nil, errdefs.Internal(errors.Errorf("failed to get edge: inconsistent graph state in edge %s %s %d", ee.Vertex.Name(), ee.Vertex.Digest(), ee.Index))
 		})
 	}
 	p := pf.s.newPipe(target, pf.e, pipe.Request{Payload: req})

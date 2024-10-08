@@ -1,6 +1,5 @@
-//go:build linux
-
-// Network utility functions.
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.21 && linux
 
 package netutils
 
@@ -9,6 +8,7 @@ import (
 	"os"
 	"slices"
 
+	"github.com/docker/docker/internal/nlwrap"
 	"github.com/docker/docker/libnetwork/internal/netiputil"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/resolvconf"
@@ -87,7 +87,7 @@ func queryOnLinkRoutes() []netip.Prefix {
 
 	var prefixes []netip.Prefix
 	for _, route := range routes {
-		if route.Dst != nil && route.Scope == netlink.SCOPE_LINK {
+		if route.Scope == netlink.SCOPE_LINK && route.Dst != nil && !route.Dst.IP.IsUnspecified() {
 			if p, ok := netiputil.ToPrefix(route.Dst); ok {
 				prefixes = append(prefixes, p)
 			}
@@ -100,17 +100,17 @@ func queryOnLinkRoutes() []netip.Prefix {
 // GenerateIfaceName returns an interface name using the passed in
 // prefix and the length of random bytes. The api ensures that the
 // there are is no interface which exists with that name.
-func GenerateIfaceName(nlh *netlink.Handle, prefix string, len int) (string, error) {
-	linkByName := netlink.LinkByName
-	if nlh != nil {
-		linkByName = nlh.LinkByName
-	}
+func GenerateIfaceName(nlh nlwrap.Handle, prefix string, len int) (string, error) {
 	for i := 0; i < 3; i++ {
 		name, err := GenerateRandomName(prefix, len)
 		if err != nil {
 			return "", err
 		}
-		_, err = linkByName(name)
+		if nlh.Handle == nil {
+			_, err = nlwrap.LinkByName(name)
+		} else {
+			_, err = nlh.LinkByName(name)
+		}
 		if err != nil {
 			if errors.As(err, &netlink.LinkNotFoundError{}) {
 				return name, nil

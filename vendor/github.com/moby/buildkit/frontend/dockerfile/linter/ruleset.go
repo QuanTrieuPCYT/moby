@@ -21,26 +21,18 @@ var (
 			return fmt.Sprintf("'%s' and '%s' keywords' casing do not match", as, from)
 		},
 	}
-	RuleNoEmptyContinuations = LinterRule[func() string]{
-		Name:        "NoEmptyContinuations",
+	RuleNoEmptyContinuation = LinterRule[func() string]{
+		Name:        "NoEmptyContinuation",
 		Description: "Empty continuation lines will become errors in a future release",
-		URL:         "https://docs.docker.com/go/dockerfile/rule/no-empty-continuations/",
+		URL:         "https://docs.docker.com/go/dockerfile/rule/no-empty-continuation/",
 		Format: func() string {
 			return "Empty continuation line"
 		},
 	}
-	RuleConsistentInstructionCasing = LinterRule[func(string) string]{
+	RuleConsistentInstructionCasing = LinterRule[func(string, string) string]{
 		Name:        "ConsistentInstructionCasing",
-		Description: "Instructions should be in consistent casing (all lower or all upper)",
-		URL:         "https://docs.docker.com/go/dockerfile/rule/consistent-instruction-casing/",
-		Format: func(command string) string {
-			return fmt.Sprintf("Command '%s' should be consistently cased", command)
-		},
-	}
-	RuleFileConsistentCommandCasing = LinterRule[func(string, string) string]{
-		Name:        "FileConsistentCommandCasing",
 		Description: "All commands within the Dockerfile should use the same casing (either upper or lower)",
-		URL:         "https://docs.docker.com/go/dockerfile/rule/file-consistent-command-casing/",
+		URL:         "https://docs.docker.com/go/dockerfile/rule/consistent-instruction-casing/",
 		Format: func(violatingCommand, correctCasing string) string {
 			return fmt.Sprintf("Command '%s' should match the case of the command majority (%s)", violatingCommand, correctCasing)
 		},
@@ -131,5 +123,46 @@ var (
 		Format: func(image, expected, actual string) string {
 			return fmt.Sprintf("Base image %s was pulled with platform %q, expected %q for current build", image, actual, expected)
 		},
+	}
+	RuleRedundantTargetPlatform = LinterRule[func(string) string]{
+		Name:        "RedundantTargetPlatform",
+		Description: "Setting platform to predefined $TARGETPLATFORM in FROM is redundant as this is the default behavior",
+		URL:         "https://docs.docker.com/go/dockerfile/rule/redundant-target-platform/",
+		Format: func(platformVar string) string {
+			return fmt.Sprintf("Setting platform to predefined %s in FROM is redundant as this is the default behavior", platformVar)
+		},
+	}
+	RuleSecretsUsedInArgOrEnv = LinterRule[func(string, string) string]{
+		Name:        "SecretsUsedInArgOrEnv",
+		Description: "Sensitive data should not be used in the ARG or ENV commands",
+		URL:         "https://docs.docker.com/go/dockerfile/rule/secrets-used-in-arg-or-env/",
+		Format: func(instruction, secretKey string) string {
+			return fmt.Sprintf("Do not use ARG or ENV instructions for sensitive data (%s %q)", instruction, secretKey)
+		},
+	}
+	RuleInvalidDefaultArgInFrom = LinterRule[func(string) string]{
+		Name:        "InvalidDefaultArgInFrom",
+		Description: "Default value for global ARG results in an empty or invalid base image name",
+		URL:         "https://docs.docker.com/go/dockerfile/rule/invalid-default-arg-in-from/",
+		Format: func(baseName string) string {
+			return fmt.Sprintf("Default value for ARG %v results in empty or invalid base image name", baseName)
+		},
+	}
+	RuleFromPlatformFlagConstDisallowed = LinterRule[func(string) string]{
+		Name:        "FromPlatformFlagConstDisallowed",
+		Description: "FROM --platform flag should not use a constant value",
+		URL:         "https://docs.docker.com/go/dockerfile/rule/from-platform-flag-const-disallowed/",
+		Format: func(platform string) string {
+			return fmt.Sprintf("FROM --platform flag should not use constant value %q", platform)
+		},
+	}
+	RuleCopyIgnoredFile = LinterRule[func(string, string) string]{
+		Name:        "CopyIgnoredFile",
+		Description: "Attempting to Copy file that is excluded by .dockerignore",
+		URL:         "https://docs.docker.com/go/dockerfile/rule/copy-ignored-file/",
+		Format: func(cmd, file string) string {
+			return fmt.Sprintf("Attempting to %s file %q that is excluded by .dockerignore", cmd, file)
+		},
+		Experimental: true,
 	}
 )

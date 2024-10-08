@@ -1,5 +1,5 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.19
+//go:build go1.21
 
 package containerimage
 
@@ -18,7 +18,6 @@ import (
 	"github.com/containerd/containerd/gc"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/platforms"
 	cdreference "github.com/containerd/containerd/reference"
 	ctdreference "github.com/containerd/containerd/reference"
 	"github.com/containerd/containerd/remotes"
@@ -26,6 +25,7 @@ import (
 	"github.com/containerd/containerd/remotes/docker/schema1" //nolint:staticcheck // Ignore SA1019: "github.com/containerd/containerd/remotes/docker/schema1" is deprecated: use images formatted in Docker Image Manifest v2, Schema 2, or OCI Image Spec v1.
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	distreference "github.com/distribution/reference"
 	dimages "github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/distribution/metadata"
@@ -953,15 +953,11 @@ func applySourcePolicies(ctx context.Context, str string, spls []*spb.Policy) (s
 	}
 
 	if mut {
-		var (
-			t  string
-			ok bool
-		)
 		t, newRef, ok := strings.Cut(op.GetIdentifier(), "://")
 		if !ok {
 			return "", errors.Errorf("could not parse ref: %s", op.GetIdentifier())
 		}
-		if ok && t != srctypes.DockerImageScheme {
+		if t != srctypes.DockerImageScheme {
 			return "", &imageutil.ResolveToNonImageError{Ref: str, Updated: newRef}
 		}
 		ref, err = cdreference.Parse(newRef)

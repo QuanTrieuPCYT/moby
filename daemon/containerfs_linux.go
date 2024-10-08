@@ -17,7 +17,6 @@ import (
 
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
-	"github.com/docker/docker/internal/compatcontext"
 	"github.com/docker/docker/internal/mounttree"
 	"github.com/docker/docker/internal/unshare"
 	"github.com/docker/docker/pkg/fileutils"
@@ -54,15 +53,17 @@ type containerFSView struct {
 }
 
 // openContainerFS opens a new view of the container's filesystem.
-func (daemon *Daemon) openContainerFS(ctr *container.Container) (_ *containerFSView, err error) {
+func (daemon *Daemon) openContainerFS(ctr *container.Container) (_ *containerFSView, retErr error) {
 	ctx := context.TODO()
 
 	if err := daemon.Mount(ctr); err != nil {
 		return nil, err
 	}
 	defer func() {
-		if err != nil {
-			_ = daemon.Unmount(ctr)
+		if retErr != nil {
+			if err := daemon.Unmount(ctr); err != nil {
+				log.G(ctx).WithError(err).Debug("Failed to unmount container after failure")
+			}
 		}
 	}()
 
@@ -71,10 +72,14 @@ func (daemon *Daemon) openContainerFS(ctr *container.Container) (_ *containerFSV
 		return nil, err
 	}
 	defer func() {
-		ctx := compatcontext.WithoutCancel(ctx)
-		cleanup(ctx)
-		if err != nil {
-			_ = ctr.UnmountVolumes(ctx, daemon.LogVolumeEvent)
+		ctx := context.WithoutCancel(ctx)
+		if err := cleanup(ctx); err != nil {
+			log.G(ctx).WithError(err).Debug("Failed to cleanup container mounts")
+		}
+		if retErr != nil {
+			if err := ctr.UnmountVolumes(ctx, daemon.LogVolumeEvent); err != nil {
+				log.G(ctx).WithError(err).Debug("Failed to unmount container volumes after failure")
+			}
 		}
 	}()
 
@@ -176,7 +181,7 @@ func (daemon *Daemon) openContainerFS(ctr *container.Container) (_ *containerFSV
 	return vw, nil
 }
 
-// RunInFS synchronously runs fn in the context of the container filesytem and
+// RunInFS synchronously runs fn in the context of the container filesystem and
 // passes through its return value.
 //
 // The container filesystem is only visible to functions called in the same

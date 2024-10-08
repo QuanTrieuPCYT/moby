@@ -13,6 +13,7 @@ import (
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/tracing"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/distribution"
 	"github.com/docker/docker/api/types/events"
@@ -45,14 +46,14 @@ type saveSession struct {
 }
 
 func (l *tarexporter) Save(ctx context.Context, names []string, outStream io.Writer) error {
-	images, err := l.parseNames(ctx, names)
+	imgDescriptors, err := l.parseNames(ctx, names)
 	if err != nil {
 		return err
 	}
 
 	// Release all the image top layer references
-	defer l.releaseLayerReferences(images)
-	return (&saveSession{tarexporter: l, images: images}).save(ctx, outStream)
+	defer l.releaseLayerReferences(imgDescriptors)
+	return (&saveSession{tarexporter: l, images: imgDescriptors}).save(ctx, outStream)
 }
 
 // parseNames will parse the image names to a map which contains image.ID to *imageDescriptor.
@@ -164,16 +165,21 @@ func (l *tarexporter) takeLayerReference(id image.ID, imgDescr *imageDescriptor)
 	if err := image.CheckOS(img.OperatingSystem()); err != nil {
 		return fmt.Errorf("os %q is not supported", img.OperatingSystem())
 	}
+	if l.platform != nil {
+		if !l.platformMatcher.Match(img.Platform()) {
+			return errors.New("no suitable export target found for platform " + platforms.FormatAll(*l.platform))
+		}
+	}
 	imgDescr.image = img
 	topLayerID := img.RootFS.ChainID()
 	if topLayerID == "" {
 		return nil
 	}
-	layer, err := l.lss.Get(topLayerID)
+	topLayer, err := l.lss.Get(topLayerID)
 	if err != nil {
 		return err
 	}
-	imgDescr.layerRef = layer
+	imgDescr.layerRef = topLayer
 	return nil
 }
 
@@ -237,7 +243,7 @@ func (s *saveSession) save(ctx context.Context, outStream io.Writer) error {
 			})
 		}
 
-		m := ocispec.Manifest{
+		data, err := json.Marshal(ocispec.Manifest{
 			Versioned: specs.Versioned{
 				SchemaVersion: 2,
 			},
@@ -248,9 +254,7 @@ func (s *saveSession) save(ctx context.Context, outStream io.Writer) error {
 				Size:      int64(len(imageDescr.image.RawJSON())),
 			},
 			Layers: foreign,
-		}
-
-		data, err := json.Marshal(m)
+		})
 		if err != nil {
 			return errors.Wrap(err, "error marshaling manifest")
 		}
@@ -269,13 +273,11 @@ func (s *saveSession) save(ctx context.Context, outStream io.Writer) error {
 		if err := system.Chtimes(mFile, time.Unix(0, 0), time.Unix(0, 0)); err != nil {
 			return errors.Wrap(err, "error setting blob directory timestamps")
 		}
-		size := int64(len(data))
 
 		untaggedMfstDesc := ocispec.Descriptor{
 			MediaType: ocispec.MediaTypeImageManifest,
 			Digest:    dgst,
-			Size:      size,
-			Platform:  m.Config.Platform,
+			Size:      int64(len(data)),
 		}
 		for _, ref := range imageDescr.refs {
 			familiarName := reference.FamiliarName(ref)

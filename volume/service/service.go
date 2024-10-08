@@ -10,7 +10,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	volumetypes "github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/pkg/directory"
+	"github.com/docker/docker/internal/directory"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/plugingetter"
 	"github.com/docker/docker/pkg/stringid"
@@ -35,7 +35,7 @@ type VolumeEventLogger interface {
 type VolumesService struct {
 	vs           *VolumeStore
 	ds           ds
-	pruneRunning int32
+	pruneRunning atomic.Bool
 	eventLogger  VolumeEventLogger
 }
 
@@ -68,7 +68,7 @@ const AnonymousLabel = "com.docker.volume.anonymous"
 // This reference ID will protect this volume from removal.
 //
 // A good example for a reference ID is a container's ID.
-// When whatever is going to reference this volume is removed the caller should defeference the volume by calling `Release`.
+// When whatever is going to reference this volume is removed the caller should dereference the volume by calling `Release`.
 func (s *VolumesService) Create(ctx context.Context, name, driverName string, options ...opts.CreateOption) (*volumetypes.Volume, error) {
 	if name == "" {
 		name = stringid.GenerateRandomID()
@@ -103,7 +103,7 @@ func (s *VolumesService) Get(ctx context.Context, name string, getOpts ...opts.G
 }
 
 // Mount mounts the volume
-// Callers should specify a uniqe reference for each Mount/Unmount pair.
+// Callers should specify a unique reference for each Mount/Unmount pair.
 //
 // Example:
 // ```go
@@ -204,10 +204,10 @@ func (s *VolumesService) LocalVolumesSize(ctx context.Context) ([]*volumetypes.V
 // Note that this intentionally skips volumes with mount options as there would
 // be no space reclaimed in this case.
 func (s *VolumesService) Prune(ctx context.Context, filter filters.Args) (*volumetypes.PruneReport, error) {
-	if !atomic.CompareAndSwapInt32(&s.pruneRunning, 0, 1) {
+	if !s.pruneRunning.CompareAndSwap(false, true) {
 		return nil, errdefs.Conflict(errors.New("a prune operation is already running"))
 	}
-	defer atomic.StoreInt32(&s.pruneRunning, 0)
+	defer s.pruneRunning.Store(false)
 
 	if err := withPrune(filter); err != nil {
 		return nil, err

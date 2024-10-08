@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/moby/buildkit/cache/remotecache"
 	"github.com/moby/buildkit/client"
 	controlgateway "github.com/moby/buildkit/control/gateway"
+	"github.com/moby/buildkit/errdefs"
 	"github.com/moby/buildkit/executor/resources"
 	resourcestypes "github.com/moby/buildkit/executor/resources/types"
 	"github.com/moby/buildkit/exporter"
@@ -34,7 +36,6 @@ import (
 	"github.com/moby/buildkit/util/bklog"
 	"github.com/moby/buildkit/util/compression"
 	"github.com/moby/buildkit/util/entitlements"
-	"github.com/moby/buildkit/util/grpcerrors"
 	"github.com/moby/buildkit/util/leaseutil"
 	"github.com/moby/buildkit/util/progress"
 	"github.com/moby/buildkit/util/tracing"
@@ -43,8 +44,6 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 const (
@@ -53,8 +52,6 @@ const (
 )
 
 type ExporterRequest struct {
-	Type           string
-	Attrs          map[string]string
 	Exporters      []exporter.ExporterInstance
 	CacheExporters []RemoteCacheExporter
 }
@@ -162,7 +159,7 @@ func (s *Solver) Bridge(b solver.Builder) frontend.FrontendLLBBridge {
 func (s *Solver) recordBuildHistory(ctx context.Context, id string, req frontend.SolveRequest, exp ExporterRequest, j *solver.Job, usage *resources.SysSampler) (func(context.Context, *Result, []exporter.DescriptorReference, error) error, error) {
 	stopTrace, err := detect.Recorder.Record(ctx)
 	if err != nil {
-		return nil, err
+		return nil, errdefs.Internal(err)
 	}
 
 	st := time.Now()
@@ -173,18 +170,21 @@ func (s *Solver) recordBuildHistory(ctx context.Context, id string, req frontend
 		CreatedAt:     &st,
 	}
 
-	if exp.Type != "" {
-		rec.Exporters = []*controlapi.Exporter{{
-			Type:  exp.Type,
-			Attrs: exp.Attrs,
-		}}
+	for _, e := range exp.Exporters {
+		rec.Exporters = append(rec.Exporters, &controlapi.Exporter{
+			Type:  e.Type(),
+			Attrs: e.Attrs(),
+		})
 	}
 
 	if err := s.history.Update(ctx, &controlapi.BuildHistoryEvent{
 		Type:   controlapi.BuildHistoryEventType_STARTED,
 		Record: rec,
 	}); err != nil {
-		return nil, err
+		if stopTrace != nil {
+			stopTrace()
+		}
+		return nil, errdefs.Internal(err)
 	}
 
 	return func(ctx context.Context, res *Result, descrefs []exporter.DescriptorReference, err error) error {
@@ -330,6 +330,7 @@ func (s *Solver) recordBuildHistory(ctx context.Context, id string, req frontend
 			rec.NumCachedSteps = int32(st.NumCachedSteps)
 			rec.NumCompletedSteps = int32(st.NumCompletedSteps)
 			rec.NumTotalSteps = int32(st.NumTotalSteps)
+			rec.NumWarnings = int32(st.NumWarnings)
 			mu.Unlock()
 			return nil
 		})
@@ -371,7 +372,8 @@ func (s *Solver) recordBuildHistory(ctx context.Context, id string, req frontend
 			})
 		}
 		if err1 := eg.Wait(); err == nil {
-			err = err1
+			// any error from exporting history record is internal
+			err = errdefs.Internal(err1)
 		}
 
 		defer func() {
@@ -381,27 +383,41 @@ func (s *Solver) recordBuildHistory(ctx context.Context, id string, req frontend
 		}()
 
 		if err != nil {
-			st, ok := grpcerrors.AsGRPCStatus(grpcerrors.ToGRPC(ctx, err))
-			if !ok {
-				st = status.New(codes.Unknown, err.Error())
+			status, desc, release, err1 := s.history.ImportError(ctx, err)
+			if err1 != nil {
+				// don't replace the build error with this import error
+				bklog.G(ctx).Errorf("failed to import error to build record: %+v", err1)
+			} else {
+				releasers = append(releasers, release)
 			}
-			rec.Error = grpcerrors.ToRPCStatus(st.Proto())
+			rec.ExternalError = desc
+			rec.Error = status
 		}
+
+		ready, done := s.history.AcquireFinalizer(rec.Ref)
+
 		if err1 := s.history.Update(ctx, &controlapi.BuildHistoryEvent{
 			Type:   controlapi.BuildHistoryEventType_COMPLETE,
 			Record: rec,
 		}); err1 != nil {
 			if err == nil {
-				err = err1
+				err = errdefs.Internal(err1)
 			}
 		}
 
 		if stopTrace == nil {
 			bklog.G(ctx).Warn("no trace recorder found, skipping")
+			done()
 			return err
 		}
 		go func() {
-			time.Sleep(3 * time.Second)
+			defer done()
+
+			// if there is no finalizer request then stop tracing after 3 seconds
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ready:
+			}
 			spans := stopTrace()
 
 			if len(spans) == 0 {
@@ -508,7 +524,7 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 		if err := s.gatewayForwarder.RegisterBuild(ctx, id, fwd); err != nil {
 			return nil, err
 		}
-		defer s.gatewayForwarder.UnregisterBuild(ctx, id)
+		defer s.gatewayForwarder.UnregisterBuild(context.WithoutCancel(ctx), id)
 	}
 
 	if !internal {
@@ -708,12 +724,10 @@ func runCacheExporters(ctx context.Context, exporters []RemoteCacheExporter, j *
 	// TODO: separate these out, and return multiple cache exporter responses
 	// to the client
 	for _, resp := range resps {
-		for k, v := range resp {
-			if cacheExporterResponse == nil {
-				cacheExporterResponse = make(map[string]string)
-			}
-			cacheExporterResponse[k] = v
+		if cacheExporterResponse == nil {
+			cacheExporterResponse = make(map[string]string)
 		}
+		maps.Copy(cacheExporterResponse, resp)
 	}
 	return cacheExporterResponse, nil
 }

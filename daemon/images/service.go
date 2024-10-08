@@ -3,6 +3,7 @@ package images // import "github.com/docker/docker/daemon/images"
 import (
 	"context"
 	"os"
+	"sync/atomic"
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/leases"
@@ -71,7 +72,7 @@ type ImageService struct {
 	eventsService             *daemonevents.Events
 	imageStore                image.Store
 	layerStore                layer.Store
-	pruneRunning              int32
+	pruneRunning              atomic.Bool
 	referenceStore            dockerreference.Store
 	registryService           distribution.RegistryResolver
 	uploadManager             *xfer.LayerUploadManager
@@ -148,7 +149,7 @@ func (i *ImageService) LayerStoreStatus() [][2]string {
 }
 
 // GetLayerMountID returns the mount ID for a layer
-// called from daemon.go Daemon.Shutdown(), and Daemon.Cleanup() (cleanup is actually continerCleanup)
+// called from daemon.go Daemon.Shutdown(), and Daemon.Cleanup() (cleanup is actually containerCleanup)
 // TODO: needs to be refactored to Unmount (see callers), or removed and replaced with GetLayerByID
 func (i *ImageService) GetLayerMountID(cid string) (string, error) {
 	return i.layerStore.GetMountID(cid)

@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/docker/docker/api/server/httpstatus"
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/types"
@@ -22,12 +22,14 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/versions"
 	containerpkg "github.com/docker/docker/container"
+	networkSettings "github.com/docker/docker/daemon/network"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/runconfig"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/net/websocket"
 )
 
@@ -40,6 +42,13 @@ func (s *containerRouter) postCommit(ctx context.Context, w http.ResponseWriter,
 		return err
 	}
 
+	// FIXME(thaJeztah): change this to unmarshal just [container.Config]:
+	// The commit endpoint accepts a [container.Config], but the decoder uses a
+	// [container.CreateRequest], which is a superset, and also contains
+	// [container.HostConfig] and [network.NetworkConfig]. Those structs
+	// are discarded here, but decoder.DecodeConfig also performs validation,
+	// so a request containing those additional fields would result in a
+	// validation error.
 	config, _, _, err := s.decoder.DecodeConfig(r.Body)
 	if err != nil && !errors.Is(err, io.EOF) { // Do not fail if body is empty.
 		return err
@@ -188,6 +197,9 @@ func (s *containerRouter) getContainersExport(ctx context.Context, w http.Respon
 }
 
 func (s *containerRouter) postContainersStart(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+	ctx, span := otel.Tracer("").Start(ctx, "containerRouter.postContainersStart")
+	defer span.End()
+
 	// If contentLength is -1, we can assumed chunked encoding
 	// or more technically that the length is unknown
 	// https://golang.org/src/pkg/net/http/request.go#L139
@@ -490,7 +502,7 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 	// Note that this is not the only place where this conversion has to be
 	// done (as there are various other places where containers get created).
 	if hostConfig.NetworkMode == "" || hostConfig.NetworkMode.IsDefault() {
-		hostConfig.NetworkMode = runconfig.DefaultDaemonNetworkMode()
+		hostConfig.NetworkMode = networkSettings.DefaultNetwork
 		if nw, ok := networkingConfig.EndpointsConfig[network.NetworkDefault]; ok {
 			networkingConfig.EndpointsConfig[hostConfig.NetworkMode.NetworkName()] = nw
 			delete(networkingConfig.EndpointsConfig, network.NetworkDefault)
@@ -757,12 +769,14 @@ func handleSysctlBC(
 			netIfSysctl := fmt.Sprintf("net.%s.%s.IFNAME.%s=%s", spl[1], spl[2], spl[4], v)
 			// Find the EndpointConfig to migrate settings to, if not already found.
 			if ep == nil {
+				/* TODO(robmry) - apply this to the API version used in 28.0.0
 				// Per-endpoint sysctls were introduced in API version 1.46. Migration is
 				// needed, but refuse to do it automatically for newer versions of the API.
-				if versions.GreaterThan(version, "1.46") {
+				if versions.GreaterThan(version, "1.??") {
 					return "", fmt.Errorf("interface specific sysctl setting %q must be supplied using driver option '%s'",
 						k, netlabel.EndpointSysctls)
 				}
+				*/
 				var err error
 				ep, err = epConfigForNetMode(version, hostConfig.NetworkMode, netConfig)
 				if err != nil {
@@ -913,7 +927,7 @@ func (s *containerRouter) postContainersAttach(ctx context.Context, w http.Respo
 	}
 
 	contentType := types.MediaTypeRawStream
-	setupStreams := func(multiplexed bool) (io.ReadCloser, io.Writer, io.Writer, error) {
+	setupStreams := func(multiplexed bool, cancel func()) (io.ReadCloser, io.Writer, io.Writer, error) {
 		conn, _, err := hijacker.Hijack()
 		if err != nil {
 			return nil, nil, nil, err
@@ -926,10 +940,14 @@ func (s *containerRouter) postContainersAttach(ctx context.Context, w http.Respo
 			if multiplexed && versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.42") {
 				contentType = types.MediaTypeMultiplexedStream
 			}
-			fmt.Fprintf(conn, "HTTP/1.1 101 UPGRADED\r\nContent-Type: "+contentType+"\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+			// FIXME(thaJeztah): we should not ignore errors here; see https://github.com/moby/moby/pull/48359#discussion_r1725562802
+			fmt.Fprintf(conn, "HTTP/1.1 101 UPGRADED\r\nContent-Type: %v\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n", contentType)
 		} else {
-			fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n")
+			// FIXME(thaJeztah): we should not ignore errors here; see https://github.com/moby/moby/pull/48359#discussion_r1725562802
+			fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n")
 		}
+
+		go notifyClosed(ctx, conn, cancel)
 
 		closer := func() error {
 			httputils.CloseStreams(conn)
@@ -979,7 +997,7 @@ func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.Respons
 
 	version := httputils.VersionFromContext(ctx)
 
-	setupStreams := func(multiplexed bool) (io.ReadCloser, io.Writer, io.Writer, error) {
+	setupStreams := func(multiplexed bool, cancel func()) (io.ReadCloser, io.Writer, io.Writer, error) {
 		wsChan := make(chan *websocket.Conn)
 		h := func(conn *websocket.Conn) {
 			wsChan <- conn
@@ -998,6 +1016,8 @@ func (s *containerRouter) wsContainersAttach(ctx context.Context, w http.Respons
 		if versions.GreaterThanOrEqualTo(version, "1.28") {
 			conn.PayloadType = websocket.BinaryFrame
 		}
+
+		// TODO: Close notifications
 		return conn, conn, conn, nil
 	}
 

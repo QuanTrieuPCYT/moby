@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	realcontainer "github.com/docker/docker/container"
@@ -73,7 +72,7 @@ func TestContainerStartOnDaemonRestart(t *testing.T) {
 	assert.Check(t, err, "failed to start test container")
 }
 
-func getContainerdShimPid(t *testing.T, c types.ContainerJSON) int {
+func getContainerdShimPid(t *testing.T, c containertypes.InspectResponse) int {
 	statB, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", c.State.Pid))
 	assert.Check(t, err, "error looking up containerd-shim pid")
 
@@ -182,7 +181,7 @@ func TestDaemonHostGatewayIP(t *testing.T) {
 // In this test we'll change the container state to "restarting".
 // This means that the container will not be 'alive' when we attempt to restore in on daemon startup.
 //
-// We could do the same with `docker run -d --resetart=always busybox:latest exit 1`, and then
+// We could do the same with `docker run -d --restart=always busybox:latest exit 1`, and then
 // `kill -9` dockerd while the container is in "restarting" state. This is difficult to reproduce reliably
 // in an automated test, so we manipulate on disk state instead.
 func TestRestartDaemonWithRestartingContainer(t *testing.T) {

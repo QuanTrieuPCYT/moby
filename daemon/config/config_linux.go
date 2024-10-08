@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/containerd/cgroups/v3"
 	"github.com/containerd/log"
@@ -15,7 +16,6 @@ import (
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/homedir"
 	"github.com/docker/docker/pkg/rootless"
-	units "github.com/docker/go-units"
 	"github.com/pkg/errors"
 )
 
@@ -34,7 +34,6 @@ const (
 	StockRuntimeName = "runc"
 
 	// userlandProxyBinary is the name of the userland-proxy binary.
-	// In rootless-mode, [rootless.RootlessKitDockerProxyBinary] is used instead.
 	userlandProxyBinary = "docker-proxy"
 )
 
@@ -72,22 +71,24 @@ type Config struct {
 	CommonConfig
 
 	// Fields below here are platform specific.
-	Runtimes             map[string]system.Runtime `json:"runtimes,omitempty"`
-	DefaultInitBinary    string                    `json:"default-init,omitempty"`
-	CgroupParent         string                    `json:"cgroup-parent,omitempty"`
-	EnableSelinuxSupport bool                      `json:"selinux-enabled,omitempty"`
-	RemappedRoot         string                    `json:"userns-remap,omitempty"`
-	Ulimits              map[string]*units.Ulimit  `json:"default-ulimits,omitempty"`
-	CPURealtimePeriod    int64                     `json:"cpu-rt-period,omitempty"`
-	CPURealtimeRuntime   int64                     `json:"cpu-rt-runtime,omitempty"`
-	Init                 bool                      `json:"init,omitempty"`
-	InitPath             string                    `json:"init-path,omitempty"`
-	SeccompProfile       string                    `json:"seccomp-profile,omitempty"`
-	ShmSize              opts.MemBytes             `json:"default-shm-size,omitempty"`
-	NoNewPrivileges      bool                      `json:"no-new-privileges,omitempty"`
-	IpcMode              string                    `json:"default-ipc-mode,omitempty"`
-	CgroupNamespaceMode  string                    `json:"default-cgroupns-mode,omitempty"`
-	Rootless             bool                      `json:"rootless,omitempty"`
+	Runtimes             map[string]system.Runtime    `json:"runtimes,omitempty"`
+	DefaultInitBinary    string                       `json:"default-init,omitempty"`
+	CgroupParent         string                       `json:"cgroup-parent,omitempty"`
+	EnableSelinuxSupport bool                         `json:"selinux-enabled,omitempty"`
+	RemappedRoot         string                       `json:"userns-remap,omitempty"`
+	Ulimits              map[string]*container.Ulimit `json:"default-ulimits,omitempty"`
+	CPURealtimePeriod    int64                        `json:"cpu-rt-period,omitempty"`
+	CPURealtimeRuntime   int64                        `json:"cpu-rt-runtime,omitempty"`
+	Init                 bool                         `json:"init,omitempty"`
+	InitPath             string                       `json:"init-path,omitempty"`
+	SeccompProfile       string                       `json:"seccomp-profile,omitempty"`
+	ShmSize              opts.MemBytes                `json:"default-shm-size,omitempty"`
+	NoNewPrivileges      bool                         `json:"no-new-privileges,omitempty"`
+	IpcMode              string                       `json:"default-ipc-mode,omitempty"`
+	CgroupNamespaceMode  string                       `json:"default-cgroupns-mode,omitempty"`
+	// ResolvConf is the path to the configuration of the host resolver
+	ResolvConf string `json:"resolv-conf,omitempty"`
+	Rootless   bool   `json:"rootless,omitempty"`
 }
 
 // GetExecRoot returns the user configured Exec-root
@@ -106,14 +107,13 @@ func (conf *Config) GetInitPath() string {
 	return DefaultInitBinary
 }
 
-// LookupInitPath returns an absolute path to the "docker-init" binary by searching relevant "libexec" directories (per FHS 3.0 & 2.3) followed by PATH
-func (conf *Config) LookupInitPath() (string, error) {
-	binary := conf.GetInitPath()
+// lookupBinPath returns an absolute path to the provided binary by searching relevant "libexec" locations (per FHS 3.0 & 2.3) followed by PATH
+func lookupBinPath(binary string) (string, error) {
 	if filepath.IsAbs(binary) {
 		return binary, nil
 	}
 
-	for _, dir := range []string{
+	lookupPaths := []string{
 		// FHS 3.0: "/usr/libexec includes internal binaries that are not intended to be executed directly by users or shell scripts. Applications may use a single subdirectory under /usr/libexec."
 		// https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch04s07.html
 		"/usr/local/libexec/docker",
@@ -123,7 +123,16 @@ func (conf *Config) LookupInitPath() (string, error) {
 		// https://refspecs.linuxfoundation.org/FHS_2.3/fhs-2.3.html#USRLIBLIBRARIESFORPROGRAMMINGANDPA
 		"/usr/local/lib/docker",
 		"/usr/lib/docker",
-	} {
+	}
+
+	// According to FHS 3.0, it is not necessary to have a subdir here (see note and reference above).
+	// If the binary has a `docker-` prefix, let's look it up without the dir prefix.
+	if strings.HasPrefix(binary, "docker-") {
+		lookupPaths = append(lookupPaths, "/usr/local/libexec")
+		lookupPaths = append(lookupPaths, "/usr/libexec")
+	}
+
+	for _, dir := range lookupPaths {
 		// exec.LookPath has a fast-path short-circuit for paths that contain "/" (skipping the PATH lookup) that then verifies whether the given path is likely to be an actual executable binary (so we invoke that instead of reimplementing the same checks)
 		if file, err := exec.LookPath(filepath.Join(dir, binary)); err == nil {
 			return file, nil
@@ -132,6 +141,17 @@ func (conf *Config) LookupInitPath() (string, error) {
 
 	// if we checked all the "libexec" directories and found no matches, fall back to PATH
 	return exec.LookPath(binary)
+}
+
+// LookupInitPath returns an absolute path to the "docker-init" binary by searching relevant "libexec" directories (per FHS 3.0 & 2.3) followed by PATH
+func (conf *Config) LookupInitPath() (string, error) {
+	return lookupBinPath(conf.GetInitPath())
+}
+
+// GetResolvConf returns the appropriate resolv.conf
+// Check setupResolvConf on how this is selected
+func (conf *Config) GetResolvConf() string {
+	return conf.ResolvConf
 }
 
 // IsSwarmCompatible defines if swarm mode can be enabled in this config
@@ -201,7 +221,7 @@ func (conf *Config) IsRootless() bool {
 }
 
 func setPlatformDefaults(cfg *Config) error {
-	cfg.Ulimits = make(map[string]*units.Ulimit)
+	cfg.Ulimits = make(map[string]*container.Ulimit)
 	cfg.ShmSize = opts.MemBytes(DefaultShmSize)
 	cfg.SeccompProfile = SeccompProfileDefault
 	cfg.IpcMode = string(DefaultIpcMode)
@@ -213,15 +233,24 @@ func setPlatformDefaults(cfg *Config) error {
 		cfg.CgroupNamespaceMode = string(DefaultCgroupNamespaceMode)
 	}
 
+	var err error
+	cfg.BridgeConfig.UserlandProxyPath, err = lookupBinPath(userlandProxyBinary)
+	if err != nil {
+		// Log, but don't error here. This allows running a daemon with
+		// userland-proxy disabled (which does not require the binary
+		// to be present).
+		//
+		// An error is still produced by [Config.ValidatePlatformConfig] if
+		// userland-proxy is enabled in the configuration.
+		//
+		// We log this at "debug" level, as this code is also executed
+		// when running "--version", and we don't want to print logs in
+		// that case..
+		log.G(context.TODO()).WithError(err).Debug("failed to lookup default userland-proxy binary")
+	}
+
 	if rootless.RunningWithRootlessKit() {
 		cfg.Rootless = true
-
-		var err error
-		// use rootlesskit-docker-proxy for exposing the ports in RootlessKit netns to the initial namespace.
-		cfg.BridgeConfig.UserlandProxyPath, err = exec.LookPath(rootless.RootlessKitDockerProxyBinary)
-		if err != nil {
-			return errors.Wrapf(err, "running with RootlessKit, but %s not installed", rootless.RootlessKitDockerProxyBinary)
-		}
 
 		dataHome, err := homedir.GetDataHome()
 		if err != nil {
@@ -236,21 +265,6 @@ func setPlatformDefaults(cfg *Config) error {
 		cfg.ExecRoot = filepath.Join(runtimeDir, "docker")
 		cfg.Pidfile = filepath.Join(runtimeDir, "docker.pid")
 	} else {
-		var err error
-		cfg.BridgeConfig.UserlandProxyPath, err = exec.LookPath(userlandProxyBinary)
-		if err != nil {
-			// Log, but don't error here. This allows running a daemon with
-			// userland-proxy disabled (which does not require the binary
-			// to be present).
-			//
-			// An error is still produced by [Config.ValidatePlatformConfig] if
-			// userland-proxy is enabled in the configuration.
-			//
-			// We log this at "debug" level, as this code is also executed
-			// when running "--version", and we don't want to print logs in
-			// that case..
-			log.G(context.TODO()).WithError(err).Debug("failed to lookup default userland-proxy binary")
-		}
 		cfg.Root = "/var/lib/docker"
 		cfg.ExecRoot = "/var/run/docker"
 		cfg.Pidfile = "/var/run/docker.pid"

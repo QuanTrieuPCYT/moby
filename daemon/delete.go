@@ -17,7 +17,7 @@ import (
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/pkg/containerfs"
+	"github.com/docker/docker/internal/containerfs"
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/pkg/errors"
 )
@@ -128,7 +128,7 @@ func (daemon *Daemon) cleanupContainer(container *container.Container, config ba
 	// Save container state to disk. So that if error happens before
 	// container meta file got removed from disk, then a restart of
 	// docker should not make a dead container alive.
-	if err := container.CheckpointTo(daemon.containersReplica); err != nil && !os.IsNotExist(err) {
+	if err := container.CheckpointTo(context.WithoutCancel(context.TODO()), daemon.containersReplica); err != nil && !os.IsNotExist(err) {
 		log.G(context.TODO()).Errorf("Error saving dying container to disk: %v", err)
 	}
 	container.Unlock()
@@ -161,6 +161,8 @@ func (daemon *Daemon) cleanupContainer(container *container.Container, config ba
 	// so that other goroutines don't attempt to concurrently open files
 	// within it. Having any file open on Windows (without the
 	// FILE_SHARE_DELETE flag) will block it from being deleted.
+	//
+	// TODO(thaJeztah): should this be moved to the "container" itself, or possibly be delegated to the graphdriver or snapshotter?
 	container.Lock()
 	err := containerfs.EnsureRemoveAll(container.Root)
 	container.Unlock()

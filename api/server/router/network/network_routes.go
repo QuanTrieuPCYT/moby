@@ -75,13 +75,13 @@ func (e invalidRequestError) Error() string {
 
 func (e invalidRequestError) InvalidParameter() {}
 
-type ambigousResultsError string
+type ambiguousResultsError string
 
-func (e ambigousResultsError) Error() string {
+func (e ambiguousResultsError) Error() string {
 	return "network " + string(e) + " is ambiguous"
 }
 
-func (ambigousResultsError) InvalidParameter() {}
+func (ambiguousResultsError) InvalidParameter() {}
 
 func (n *networkRouter) getNetwork(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
@@ -182,7 +182,7 @@ func (n *networkRouter) getNetwork(ctx context.Context, w http.ResponseWriter, r
 		}
 	}
 	if len(listByFullName) > 1 {
-		return errors.Wrapf(ambigousResultsError(term), "%d matches found based on name", len(listByFullName))
+		return errors.Wrapf(ambiguousResultsError(term), "%d matches found based on name", len(listByFullName))
 	}
 
 	// Find based on partial ID, returns true only if no duplicates
@@ -192,7 +192,7 @@ func (n *networkRouter) getNetwork(ctx context.Context, w http.ResponseWriter, r
 		}
 	}
 	if len(listByPartialID) > 1 {
-		return errors.Wrapf(ambigousResultsError(term), "%d matches found based on ID prefix", len(listByPartialID))
+		return errors.Wrapf(ambiguousResultsError(term), "%d matches found based on ID prefix", len(listByPartialID))
 	}
 
 	return libnetwork.ErrNoSuchNetwork(term)
@@ -210,6 +210,13 @@ func (n *networkRouter) postNetworkCreate(ctx context.Context, w http.ResponseWr
 
 	if nws, err := n.cluster.GetNetworksByName(create.Name); err == nil && len(nws) > 0 {
 		return libnetwork.NetworkNameError(create.Name)
+	}
+
+	version := httputils.VersionFromContext(ctx)
+
+	// EnableIPv4 was introduced in API 1.47.
+	if versions.LessThan(version, "1.47") {
+		create.EnableIPv4 = nil
 	}
 
 	// For a Swarm-scoped network, this call to backend.CreateNetwork is used to
@@ -247,7 +254,7 @@ func (n *networkRouter) postNetworkConnect(ctx context.Context, w http.ResponseW
 	// The reason is that, In case of attachable network in swarm scope, the actual local network
 	// may not be available at the time. At the same time, inside daemon `ConnectContainerToNetwork`
 	// does the ambiguity check anyway. Therefore, passing the name to daemon would be enough.
-	return n.backend.ConnectContainerToNetwork(connect.Container, vars["id"], connect.EndpointConfig)
+	return n.backend.ConnectContainerToNetwork(ctx, connect.Container, vars["id"], connect.EndpointConfig)
 }
 
 func (n *networkRouter) postNetworkDisconnect(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {

@@ -1,3 +1,6 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.21
+
 // Package ipamutils provides utility functions for ipam management
 package ipamutils
 
@@ -41,7 +44,7 @@ func (n NetworkToSplit) Overlaps(p netip.Prefix) bool {
 	return n.Base.Overlaps(p)
 }
 
-// GetGlobalScopeDefaultNetworks returns a copy of the global-sopce network list.
+// GetGlobalScopeDefaultNetworks returns a copy of the global-scope network list.
 func GetGlobalScopeDefaultNetworks() []*NetworkToSplit {
 	return slices.Clone(globalScopeDefaultNetworks)
 }

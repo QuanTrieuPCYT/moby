@@ -13,18 +13,20 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containerd/containerd/pkg/userns"
 	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/graphdriver"
 	"github.com/docker/docker/daemon/graphdriver/overlayutils"
+	"github.com/docker/docker/daemon/internal/fstype"
+	"github.com/docker/docker/daemon/internal/mountref"
+	"github.com/docker/docker/internal/containerfs"
+	"github.com/docker/docker/internal/directory"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/chrootarchive"
-	"github.com/docker/docker/pkg/containerfs"
-	"github.com/docker/docker/pkg/directory"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers/kernel"
 	"github.com/moby/locker"
 	"github.com/moby/sys/mount"
+	"github.com/moby/sys/userns"
 	"github.com/opencontainers/selinux/go-selinux/label"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
@@ -58,7 +60,7 @@ const (
 type Driver struct {
 	home      string
 	idMap     idtools.IdentityMapping
-	ctr       *graphdriver.RefCounter
+	ctr       *mountref.Counter
 	naiveDiff graphdriver.DiffDriver
 	locker    *locker.Locker
 }
@@ -97,13 +99,19 @@ func Init(home string, options []string, idMap idtools.IdentityMapping) (graphdr
 	d := &Driver{
 		home:   home,
 		idMap:  idMap,
-		ctr:    graphdriver.NewRefCounter(graphdriver.NewFsChecker(graphdriver.FsMagicFUSE)),
+		ctr:    mountref.NewCounter(isMounted),
 		locker: locker.New(),
 	}
 
 	d.naiveDiff = graphdriver.NewNaiveDiffDriver(d, idMap)
 
 	return d, nil
+}
+
+// isMounted checks whether the given path is a [fstype.FsMagicFUSE] mount.
+func isMounted(path string) bool {
+	fsType, _ := fstype.GetFSMagic(path)
+	return fsType == fstype.FsMagicFUSE
 }
 
 func (d *Driver) String() string {

@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/libnetwork/internal/resolvconf"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel"
 )
 
 const (
@@ -30,12 +31,12 @@ const (
 // finishInitDNS is to be called after the container namespace has been created,
 // before it the user process is started. The container's support for IPv6 can be
 // determined at this point.
-func (sb *Sandbox) finishInitDNS() error {
+func (sb *Sandbox) finishInitDNS(ctx context.Context) error {
 	if err := sb.buildHostsFile(); err != nil {
 		return errdefs.System(err)
 	}
 	for _, ep := range sb.Endpoints() {
-		if err := sb.updateHostsFile(ep.getEtcHostsAddrs()); err != nil {
+		if err := sb.updateHostsFile(ctx, ep.getEtcHostsAddrs()); err != nil {
 			return errdefs.System(err)
 		}
 	}
@@ -80,7 +81,10 @@ func (sb *Sandbox) startResolver(restore bool) {
 	})
 }
 
-func (sb *Sandbox) setupResolutionFiles() error {
+func (sb *Sandbox) setupResolutionFiles(ctx context.Context) error {
+	_, span := otel.Tracer("").Start(ctx, "libnetwork.Sandbox.setupResolutionFiles")
+	defer span.End()
+
 	// Create a hosts file that can be mounted during container setup. For most
 	// networking modes (not host networking) it will be re-created before the
 	// container start, once its support for IPv6 is known.
@@ -133,7 +137,10 @@ func (sb *Sandbox) buildHostsFile() error {
 	return sb.updateParentHosts()
 }
 
-func (sb *Sandbox) updateHostsFile(ifaceIPs []string) error {
+func (sb *Sandbox) updateHostsFile(ctx context.Context, ifaceIPs []string) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.updateHostsFile")
+	defer span.End()
+
 	if len(ifaceIPs) == 0 {
 		return nil
 	}
@@ -295,6 +302,27 @@ func (sb *Sandbox) setupDNS() error {
 	return rc.WriteFile(sb.config.resolvConfPath, sb.config.resolvConfHashFile, filePerm)
 }
 
+// Called when an endpoint has joined the sandbox.
+func (sb *Sandbox) updateDNS(ipv6Enabled bool) error {
+	if mod, err := resolvconf.UserModified(sb.config.resolvConfPath, sb.config.resolvConfHashFile); err != nil || mod {
+		return err
+	}
+
+	// Load the host's resolv.conf as a starting point.
+	rc, err := sb.loadResolvConf(sb.config.getOriginResolvConfPath())
+	if err != nil {
+		return err
+	}
+	// For host-networking, no further change is needed.
+	if !sb.config.useDefaultSandBox {
+		// The legacy bridge network has no internal nameserver. So, strip localhost
+		// nameservers from the host's config, then add default nameservers if there
+		// are none remaining.
+		rc.TransformForLegacyNw(ipv6Enabled)
+	}
+	return rc.WriteFile(sb.config.resolvConfPath, sb.config.resolvConfHashFile, filePerm)
+}
+
 // Embedded DNS server has to be enabled for this sandbox. Rebuild the container's resolv.conf.
 func (sb *Sandbox) rebuildDNS() error {
 	// Don't touch the file if the user has modified it.
@@ -308,21 +336,6 @@ func (sb *Sandbox) rebuildDNS() error {
 		return err
 	}
 
-	// Check for IPv6 endpoints in this sandbox. If there are any, and the container has
-	// IPv6 enabled, upstream requests from the internal DNS resolver can be made from
-	// the container's namespace.
-	// TODO(robmry) - this can only check networks connected when the resolver is set up,
-	//  the configuration won't be updated if the container gets an IPv6 address later.
-	ipv6 := false
-	for _, ep := range sb.endpoints {
-		if ep.network.enableIPv6 {
-			if en, ok := sb.ipv6Enabled(); ok {
-				ipv6 = en
-			}
-			break
-		}
-	}
-
 	intNS := sb.resolver.NameServer()
 	if !intNS.IsValid() {
 		return fmt.Errorf("no listen-address for internal resolver")
@@ -332,7 +345,7 @@ func (sb *Sandbox) rebuildDNS() error {
 	_, sb.ndotsSet = rc.Option("ndots")
 	// Swap nameservers for the internal one, and make sure the required options are set.
 	var extNameServers []resolvconf.ExtDNSEntry
-	extNameServers, err = rc.TransformForIntNS(ipv6, intNS, sb.resolver.ResolverOptions())
+	extNameServers, err = rc.TransformForIntNS(intNS, sb.resolver.ResolverOptions())
 	if err != nil {
 		return err
 	}
@@ -340,14 +353,14 @@ func (sb *Sandbox) rebuildDNS() error {
 	// upstream nameservers.
 	sb.setExternalResolvers(extNameServers)
 
-	// Write the file for the container - not updating the hash file (so, no further
-	// updates will be made).
-	//
-	// Once the default resolver is configured, there's not normally any need to change
-	// the container's resolv.conf. A possible exception is if an IPv6 endpoint is added
-	// late, so it becomes possible to make upstream requests to IPv6 resolvers from
-	// the container's network namespace. But, the resolver's ext-servers won't currently
-	// be reconfigured once it's started.
+	// Write the file for the container - preserving old behaviour, not updating the
+	// hash file (so, no further updates will be made).
+	// TODO(robmry) - I think that's probably accidental, I can't find a reason for it,
+	//  and the old resolvconf.Build() function wrote the file but not the hash, which
+	//  is surprising. But, before fixing it, a guard/flag needs to be added to
+	//  sb.updateDNS() to make sure that when an endpoint joins a sandbox that already
+	//  has an internal resolver, the container's resolv.conf is still (re)configured
+	//  for an internal resolver.
 	return rc.WriteFile(sb.config.resolvConfPath, "", filePerm)
 }
 

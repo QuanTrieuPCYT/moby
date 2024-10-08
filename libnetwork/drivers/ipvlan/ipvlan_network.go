@@ -7,13 +7,13 @@ import (
 	"fmt"
 
 	"github.com/containerd/log"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/libnetwork/driverapi"
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/options"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/docker/docker/pkg/parsers/kernel"
-	"github.com/docker/docker/pkg/stringid"
 )
 
 // CreateNetwork the network for the specified driver type
@@ -27,9 +27,17 @@ func (d *driver) CreateNetwork(nid string, option map[string]interface{}, nInfo 
 		return fmt.Errorf("kernel version failed to meet the minimum ipvlan kernel requirement of %d.%d, found %d.%d.%d",
 			ipvlanKernelVer, ipvlanMajorVer, kv.Kernel, kv.Major, kv.Minor)
 	}
-	// reject a null v4 network
-	if len(ipV4Data) == 0 || ipV4Data[0].Pool.String() == "0.0.0.0/0" {
-		return fmt.Errorf("ipv4 pool is empty")
+	// reject a null v4 network if ipv4 is required
+	if v, ok := option[netlabel.EnableIPv4]; ok && v.(bool) {
+		if len(ipV4Data) == 0 || ipV4Data[0].Pool.String() == "0.0.0.0/0" {
+			return errdefs.InvalidParameter(fmt.Errorf("ipv4 pool is empty"))
+		}
+	}
+	// reject a null v6 network if ipv6 is required
+	if v, ok := option[netlabel.EnableIPv6]; ok && v.(bool) {
+		if len(ipV6Data) == 0 || ipV6Data[0].Pool.String() == "::/0" {
+			return errdefs.InvalidParameter(fmt.Errorf("ipv6 pool is empty"))
+		}
 	}
 	// parse and validate the config and bind to networkConfiguration
 	config, err := parseNetworkOptions(nid, option)
@@ -40,7 +48,7 @@ func (d *driver) CreateNetwork(nid string, option map[string]interface{}, nInfo 
 
 	// if parent interface not specified, create a dummy type link to use named dummy+net_id
 	if config.Parent == "" {
-		config.Parent = getDummyName(stringid.TruncateID(config.ID))
+		config.Parent = getDummyName(config.ID)
 		config.Internal = true
 	}
 	foundExisting, err := d.createNetwork(config)
@@ -71,7 +79,7 @@ func (d *driver) createNetwork(config *configuration) (bool, error) {
 		if config.Parent == nw.config.Parent {
 			if config.ID != nw.config.ID {
 				return false, fmt.Errorf("network %s is already using parent interface %s",
-					getDummyName(stringid.TruncateID(nw.config.ID)), config.Parent)
+					getDummyName(nw.config.ID), config.Parent)
 			}
 			log.G(context.TODO()).Debugf("Create Network for the same ID %s\n", config.ID)
 			foundExisting = true
@@ -80,7 +88,7 @@ func (d *driver) createNetwork(config *configuration) (bool, error) {
 	}
 	if !parentExists(config.Parent) {
 		// Create a dummy link if a dummy name is set for parent
-		if dummyName := getDummyName(stringid.TruncateID(config.ID)); dummyName == config.Parent {
+		if dummyName := getDummyName(config.ID); dummyName == config.Parent {
 			err := createDummyLink(config.Parent, dummyName)
 			if err != nil {
 				return false, err
@@ -126,7 +134,7 @@ func (d *driver) DeleteNetwork(nid string) error {
 		// if the interface exists, only delete if it matches iface.vlan or dummy.net_id naming
 		if ok := parentExists(n.config.Parent); ok {
 			// only delete the link if it is named the net_id
-			if n.config.Parent == getDummyName(stringid.TruncateID(nid)) {
+			if n.config.Parent == getDummyName(nid) {
 				err := delDummyLink(n.config.Parent)
 				if err != nil {
 					log.G(context.TODO()).Debugf("link %s was not deleted, continuing the delete network operation: %v",

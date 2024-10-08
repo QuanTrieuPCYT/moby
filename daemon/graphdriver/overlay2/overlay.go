@@ -18,10 +18,12 @@ import (
 	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/graphdriver"
 	"github.com/docker/docker/daemon/graphdriver/overlayutils"
+	"github.com/docker/docker/daemon/internal/fstype"
+	"github.com/docker/docker/daemon/internal/mountref"
+	"github.com/docker/docker/internal/containerfs"
+	"github.com/docker/docker/internal/directory"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/chrootarchive"
-	"github.com/docker/docker/pkg/containerfs"
-	"github.com/docker/docker/pkg/directory"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/parsers"
@@ -29,6 +31,7 @@ import (
 	units "github.com/docker/go-units"
 	"github.com/moby/locker"
 	"github.com/moby/sys/mount"
+	"github.com/moby/sys/userns"
 	"github.com/opencontainers/selinux/go-selinux/label"
 	"golang.org/x/sys/unix"
 )
@@ -91,7 +94,7 @@ type overlayOptions struct {
 type Driver struct {
 	home          string
 	idMap         idtools.IdentityMapping
-	ctr           *graphdriver.RefCounter
+	ctr           *mountref.Counter
 	quotaCtl      *quota.Control
 	options       overlayOptions
 	naiveDiff     graphdriver.DiffDriver
@@ -141,11 +144,11 @@ func Init(home string, options []string, idMap idtools.IdentityMapping) (graphdr
 		return nil, graphdriver.ErrNotSupported
 	}
 
-	fsMagic, err := graphdriver.GetFSMagic(testdir)
+	fsMagic, err := fstype.GetFSMagic(testdir)
 	if err != nil {
 		return nil, err
 	}
-	if fsName, ok := graphdriver.FsNames[fsMagic]; ok {
+	if fsName, ok := fstype.FsNames[fsMagic]; ok {
 		backingFs = fsName
 	}
 
@@ -177,7 +180,7 @@ func Init(home string, options []string, idMap idtools.IdentityMapping) (graphdr
 	d := &Driver{
 		home:          home,
 		idMap:         idMap,
-		ctr:           graphdriver.NewRefCounter(graphdriver.NewFsChecker(graphdriver.FsMagicOverlay)),
+		ctr:           mountref.NewCounter(isMounted),
 		supportsDType: supportsDType,
 		usingMetacopy: usingMetacopy,
 		locker:        locker.New(),
@@ -221,6 +224,12 @@ func Init(home string, options []string, idMap idtools.IdentityMapping) (graphdr
 		backingFs, projectQuotaSupported, usingMetacopy, indexOff, userxattr)
 
 	return d, nil
+}
+
+// isMounted checks whether the given path is a [fstype.FsMagicOverlay] mount.
+func isMounted(path string) bool {
+	fsType, _ := fstype.GetFSMagic(path)
+	return fsType == fstype.FsMagicOverlay
 }
 
 func parseOptions(options []string) (*overlayOptions, error) {
@@ -678,7 +687,6 @@ func (d *Driver) ApplyDiff(id string, parent string, diff io.Reader) (size int64
 		return d.naiveDiff.ApplyDiff(id, parent, diff)
 	}
 
-	// never reach here if we are running in UserNS
 	applyDir := d.getDiffPath(id)
 
 	logger.Debugf("Applying tar in %s", applyDir)
@@ -686,6 +694,7 @@ func (d *Driver) ApplyDiff(id string, parent string, diff io.Reader) (size int64
 	if err := untar(diff, applyDir, &archive.TarOptions{
 		IDMap:          d.idMap,
 		WhiteoutFormat: archive.OverlayWhiteoutFormat,
+		InUserNS:       userns.RunningInUserNS(),
 	}); err != nil {
 		return 0, err
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/containerd"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/versions"
@@ -28,7 +29,7 @@ import (
 
 func TestCreateFailsWhenIdentifierDoesNotExist(t *testing.T) {
 	ctx := setupTest(t)
-	client := testEnv.APIClient()
+	apiClient := testEnv.APIClient()
 
 	testCases := []struct {
 		doc           string
@@ -57,7 +58,7 @@ func TestCreateFailsWhenIdentifierDoesNotExist(t *testing.T) {
 		t.Run(tc.doc, func(t *testing.T) {
 			t.Parallel()
 			ctx := testutil.StartSpan(ctx, t)
-			_, err := client.ContainerCreate(ctx,
+			_, err := apiClient.ContainerCreate(ctx,
 				&container.Config{Image: tc.image},
 				&container.HostConfig{},
 				&network.NetworkingConfig{},
@@ -95,7 +96,7 @@ func TestCreateLinkToNonExistingContainer(t *testing.T) {
 
 func TestCreateWithInvalidEnv(t *testing.T) {
 	ctx := setupTest(t)
-	client := testEnv.APIClient()
+	apiClient := testEnv.APIClient()
 
 	testCases := []struct {
 		env           string
@@ -120,7 +121,7 @@ func TestCreateWithInvalidEnv(t *testing.T) {
 		t.Run(strconv.Itoa(index), func(t *testing.T) {
 			t.Parallel()
 			ctx := testutil.StartSpan(ctx, t)
-			_, err := client.ContainerCreate(ctx,
+			_, err := apiClient.ContainerCreate(ctx,
 				&container.Config{
 					Image: "busybox",
 					Env:   []string{tc.env},
@@ -141,7 +142,7 @@ func TestCreateTmpfsMountsTarget(t *testing.T) {
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
 	ctx := setupTest(t)
 
-	client := testEnv.APIClient()
+	apiClient := testEnv.APIClient()
 
 	testCases := []struct {
 		target        string
@@ -166,7 +167,7 @@ func TestCreateTmpfsMountsTarget(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		_, err := client.ContainerCreate(ctx,
+		_, err := apiClient.ContainerCreate(ctx,
 			&container.Config{
 				Image: "busybox",
 			},
@@ -220,7 +221,7 @@ func TestCreateWithCustomMaskedPaths(t *testing.T) {
 		maskedPaths, ok := cfg["MaskedPaths"].([]interface{})
 		assert.Check(t, is.Equal(true, ok), name)
 
-		mps := []string{}
+		var mps = make([]string, 0, len(maskedPaths))
 		for _, mp := range maskedPaths {
 			mps = append(mps, mp.(string))
 		}
@@ -301,7 +302,7 @@ func TestCreateWithCustomReadonlyPaths(t *testing.T) {
 		readonlyPaths, ok := cfg["ReadonlyPaths"].([]interface{})
 		assert.Check(t, is.Equal(true, ok), name)
 
-		rops := []string{}
+		var rops = make([]string, 0, len(readonlyPaths))
 		for _, rop := range readonlyPaths {
 			rops = append(rops, rop.(string))
 		}
@@ -427,7 +428,7 @@ func TestCreateWithInvalidHealthcheckParams(t *testing.T) {
 	}
 }
 
-// Make sure that anonymous volumes can be overritten by tmpfs
+// Make sure that anonymous volumes can be overwritten by tmpfs
 // https://github.com/moby/moby/issues/40446
 func TestCreateTmpfsOverrideAnonymousVolume(t *testing.T) {
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows", "windows does not support tmpfs")
@@ -666,5 +667,42 @@ func TestCreateWithCustomMACs(t *testing.T) {
 
 		mac := fields[len(fields)-3]
 		assert.Equal(t, mac, "02:32:1c:23:00:04")
+	}
+}
+
+// Tests that when using containerd backed storage the containerd container has the image referenced stored.
+func TestContainerdContainerImageInfo(t *testing.T) {
+	skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.46"), "requires API v1.46")
+
+	ctx := setupTest(t)
+
+	apiClient := testEnv.APIClient()
+	defer apiClient.Close()
+
+	info, err := apiClient.Info(ctx)
+	assert.NilError(t, err)
+
+	skip.If(t, info.Containerd == nil, "requires containerd")
+
+	// Currently a containerd container is only created when the container is started.
+	// So start the container and then inspect the containerd container to verify the image info.
+	id := ctr.Run(ctx, t, apiClient, func(cfg *ctr.TestContainerConfig) {
+		// busybox is the default (as of this writing) used by the test client, but lets be explicit here.
+		cfg.Config.Image = "busybox"
+	})
+	defer apiClient.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+
+	client, err := containerd.New(info.Containerd.Address, containerd.WithDefaultNamespace(info.Containerd.Namespaces.Containers))
+	assert.NilError(t, err)
+	defer client.Close()
+
+	ctr, err := client.ContainerService().Get(ctx, id)
+	assert.NilError(t, err)
+
+	if testEnv.UsingSnapshotter() {
+		assert.Equal(t, ctr.Image, "docker.io/library/busybox:latest")
+	} else {
+		// This field is not set when not using containerd backed storage.
+		assert.Equal(t, ctr.Image, "")
 	}
 }

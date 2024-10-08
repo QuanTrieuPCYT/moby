@@ -20,7 +20,7 @@ import (
 	"gotest.tools/v3/skip"
 )
 
-func TestDockerNetworkMacvlanPersistance(t *testing.T) {
+func TestDockerNetworkMacvlanPersistence(t *testing.T) {
 	// verify the driver automatically provisions the 802.1q link (dm-dummy0.60)
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, testEnv.IsRootless, "rootless mode has different view of network")
@@ -63,6 +63,18 @@ func TestDockerNetworkMacvlan(t *testing.T) {
 			name: "OverlapParent",
 			test: testMacvlanOverlapParent,
 		}, {
+			name: "OverlapParentPassthruFirst",
+			test: testMacvlanOverlapParentPassthruFirst,
+		}, {
+			name: "OverlapParentPassthruSecond",
+			test: testMacvlanOverlapParentPassthruSecond,
+		}, {
+			name: "OverlapDeleteCreatedSecond",
+			test: testMacvlanOverlapDeleteCreatedSecond,
+		}, {
+			name: "OverlapKeepExistingParent",
+			test: testMacvlanOverlapKeepExisting,
+		}, {
 			name: "NilParent",
 			test: testMacvlanNilParent,
 		}, {
@@ -78,8 +90,8 @@ func TestDockerNetworkMacvlan(t *testing.T) {
 			name: "Addressing",
 			test: testMacvlanAddressing,
 		}, {
-			name: "NoIPv6",
-			test: testMacvlanNoIPv6,
+			name: "MacvlanExperimentalV4Only",
+			test: testMacvlanExperimentalV4Only,
 		},
 	} {
 		tc := tc
@@ -99,7 +111,8 @@ func TestDockerNetworkMacvlan(t *testing.T) {
 }
 
 func testMacvlanOverlapParent(t *testing.T, ctx context.Context, client client.APIClient) {
-	// verify the same parent interface cannot be used if already in use by an existing network
+	// verify the same parent interface can be used if already in use by an existing network
+	// as long as neither are passthru
 	master := "dm-dummy0"
 	n.CreateMasterDummy(ctx, t, master)
 	defer n.DeleteInterface(ctx, t, master)
@@ -108,6 +121,42 @@ func testMacvlanOverlapParent(t *testing.T, ctx context.Context, client client.A
 	parentName := "dm-dummy0.40"
 	net.CreateNoError(ctx, t, client, netName,
 		net.WithMacvlan(parentName),
+	)
+	assert.Check(t, n.IsNetworkAvailable(ctx, client, netName))
+	n.LinkExists(ctx, t, parentName)
+
+	overlapNetName := "dm-parent-net-overlap"
+	_, err := net.Create(ctx, client, overlapNetName,
+		net.WithMacvlan(parentName),
+	)
+	assert.Check(t, err == nil)
+
+	// delete the second network while preserving the parent link
+	err = client.NetworkRemove(ctx, overlapNetName)
+	assert.NilError(t, err)
+	assert.Check(t, n.IsNetworkNotAvailable(ctx, client, overlapNetName))
+	n.LinkExists(ctx, t, parentName)
+
+	// delete the first network
+	err = client.NetworkRemove(ctx, netName)
+	assert.NilError(t, err)
+	assert.Check(t, n.IsNetworkNotAvailable(ctx, client, netName))
+	n.LinkDoesntExist(ctx, t, parentName)
+
+	// verify the network delete did not delete the root link
+	n.LinkExists(ctx, t, master)
+}
+
+func testMacvlanOverlapParentPassthruFirst(t *testing.T, ctx context.Context, client client.APIClient) {
+	// verify creating a second interface sharing a parent with another passthru interface is rejected
+	master := "dm-dummy0"
+	n.CreateMasterDummy(ctx, t, master)
+	defer n.DeleteInterface(ctx, t, master)
+
+	netName := "dm-subinterface"
+	parentName := "dm-dummy0.40"
+	net.CreateNoError(ctx, t, client, netName,
+		net.WithMacvlanPassthru(parentName),
 	)
 	assert.Check(t, n.IsNetworkAvailable(ctx, client, netName))
 
@@ -122,6 +171,96 @@ func testMacvlanOverlapParent(t *testing.T, ctx context.Context, client client.A
 
 	assert.Check(t, n.IsNetworkNotAvailable(ctx, client, netName))
 	// verify the network delete did not delete the predefined link
+	n.LinkExists(ctx, t, master)
+}
+
+func testMacvlanOverlapParentPassthruSecond(t *testing.T, ctx context.Context, client client.APIClient) {
+	// verify creating a passthru interface sharing a parent with another interface is rejected
+	master := "dm-dummy0"
+	n.CreateMasterDummy(ctx, t, master)
+	defer n.DeleteInterface(ctx, t, master)
+
+	netName := "dm-subinterface"
+	parentName := "dm-dummy0.40"
+	net.CreateNoError(ctx, t, client, netName,
+		net.WithMacvlan(parentName),
+	)
+	assert.Check(t, n.IsNetworkAvailable(ctx, client, netName))
+
+	_, err := net.Create(ctx, client, "dm-parent-net-overlap",
+		net.WithMacvlanPassthru(parentName),
+	)
+	assert.Check(t, err != nil)
+
+	// delete the network while preserving the parent link
+	err = client.NetworkRemove(ctx, netName)
+	assert.NilError(t, err)
+
+	assert.Check(t, n.IsNetworkNotAvailable(ctx, client, netName))
+	// verify the network delete did not delete the predefined link
+	n.LinkExists(ctx, t, master)
+}
+
+func testMacvlanOverlapDeleteCreatedSecond(t *testing.T, ctx context.Context, client client.APIClient) {
+	// verify that a shared created parent interface is kept when the original interface is deleted first
+	master := "dm-dummy0"
+	n.CreateMasterDummy(ctx, t, master)
+	defer n.DeleteInterface(ctx, t, master)
+
+	netName := "dm-subinterface"
+	parentName := "dm-dummy0.40"
+	net.CreateNoError(ctx, t, client, netName,
+		net.WithMacvlan(parentName),
+	)
+	assert.Check(t, n.IsNetworkAvailable(ctx, client, netName))
+
+	overlapNetName := "dm-parent-net-overlap"
+	_, err := net.Create(ctx, client, overlapNetName,
+		net.WithMacvlan(parentName),
+	)
+	assert.Check(t, err == nil)
+
+	// delete the original network while preserving the parent link
+	err = client.NetworkRemove(ctx, netName)
+	assert.NilError(t, err)
+	assert.Check(t, n.IsNetworkNotAvailable(ctx, client, netName))
+	n.LinkExists(ctx, t, parentName)
+
+	// delete the second network
+	err = client.NetworkRemove(ctx, overlapNetName)
+	assert.NilError(t, err)
+	assert.Check(t, n.IsNetworkNotAvailable(ctx, client, overlapNetName))
+	n.LinkDoesntExist(ctx, t, parentName)
+
+	// verify the network delete did not delete the root link
+	n.LinkExists(ctx, t, master)
+}
+
+func testMacvlanOverlapKeepExisting(t *testing.T, ctx context.Context, client client.APIClient) {
+	// verify that deleting interfaces sharing a previously existing parent doesn't delete the
+	// parent
+	master := "dm-dummy0"
+	n.CreateMasterDummy(ctx, t, master)
+	defer n.DeleteInterface(ctx, t, master)
+
+	netName := "dm-subinterface"
+	net.CreateNoError(ctx, t, client, netName,
+		net.WithMacvlan(master),
+	)
+	assert.Check(t, n.IsNetworkAvailable(ctx, client, netName))
+
+	overlapNetName := "dm-parent-net-overlap"
+	_, err := net.Create(ctx, client, overlapNetName,
+		net.WithMacvlan(master),
+	)
+	assert.Check(t, err == nil)
+
+	err = client.NetworkRemove(ctx, overlapNetName)
+	assert.NilError(t, err)
+	err = client.NetworkRemove(ctx, netName)
+	assert.NilError(t, err)
+
+	// verify the network delete did not delete the root link
 	n.LinkExists(ctx, t, master)
 }
 
@@ -301,30 +440,117 @@ func testMacvlanAddressing(t *testing.T, ctx context.Context, client client.APIC
 	assert.Check(t, strings.Contains(result.Combined(), "default via 2001:db8:abca::254 dev eth0"))
 }
 
+// Check that '--ipv4=false' is only allowed with '--experimental'.
+// (Remember to remove `--experimental' from TestMacvlanIPAM when it's
+// no longer needed, and maybe use a single daemon for all of its tests.)
+func testMacvlanExperimentalV4Only(t *testing.T, ctx context.Context, client client.APIClient) {
+	_, err := net.Create(ctx, client, "testnet",
+		net.WithMacvlan(""),
+		net.WithIPv4(false),
+	)
+	defer client.NetworkRemove(ctx, "testnet")
+	assert.Assert(t, is.ErrorContains(err, "IPv4 can only be disabled if experimental features are enabled"))
+}
+
 // Check that a macvlan interface with '--ipv6=false' doesn't get kernel-assigned
 // IPv6 addresses, but the loopback interface does still have an IPv6 address ('::1').
-func testMacvlanNoIPv6(t *testing.T, ctx context.Context, client client.APIClient) {
-	const netName = "macvlannet"
+// Also check that with '--ipv4=false', there's no IPAM-assigned IPv4 address.
+func TestMacvlanIPAM(t *testing.T) {
+	skip.If(t, testEnv.IsRemoteDaemon)
+	skip.If(t, testEnv.IsRootless, "rootless mode has different view of network")
 
-	net.CreateNoError(ctx, t, client, netName,
-		net.WithMacvlan(""),
-		net.WithOption("macvlan_mode", "bridge"),
-	)
-	assert.Check(t, n.IsNetworkAvailable(ctx, client, netName))
+	ctx := testutil.StartSpan(baseContext, t)
 
-	id := container.Run(ctx, t, client, container.WithNetworkMode(netName))
+	testcases := []struct {
+		name       string
+		apiVersion string
+		enableIPv4 bool
+		enableIPv6 bool
+		expIPv4    bool
+	}{
+		{
+			name:       "dual stack",
+			enableIPv4: true,
+			enableIPv6: true,
+		},
+		{
+			name:       "v4 only",
+			enableIPv4: true,
+		},
+		{
+			name:       "v6 only",
+			enableIPv6: true,
+		},
+		{
+			name: "no ipam",
+		},
+		{
+			name:       "enableIPv4 ignored",
+			apiVersion: "1.46",
+			enableIPv4: false,
+			expIPv4:    true,
+		},
+	}
 
-	loRes := container.ExecT(ctx, t, client, id, []string{"ip", "a", "show", "dev", "lo"})
-	assert.Check(t, is.Contains(loRes.Combined(), " inet "))
-	assert.Check(t, is.Contains(loRes.Combined(), " inet6 "))
+	for _, tc := range testcases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := testutil.StartSpan(ctx, t)
 
-	eth0Res := container.ExecT(ctx, t, client, id, []string{"ip", "a", "show", "dev", "eth0"})
-	assert.Check(t, is.Contains(eth0Res.Combined(), " inet "))
-	assert.Check(t, !strings.Contains(eth0Res.Combined(), " inet6 "),
-		"result.Combined(): %s", eth0Res.Combined())
+			var daemonOpts []daemon.Option
+			if !tc.enableIPv4 {
+				daemonOpts = append(daemonOpts, daemon.WithExperimental())
+			}
+			d := daemon.New(t, daemonOpts...)
+			d.StartWithBusybox(ctx, t)
+			t.Cleanup(func() { d.Stop(t) })
+			c := d.NewClientT(t, client.WithVersion(tc.apiVersion))
 
-	sysctlRes := container.ExecT(ctx, t, client, id, []string{"sysctl", "-n", "net.ipv6.conf.eth0.disable_ipv6"})
-	assert.Check(t, is.Equal(strings.TrimSpace(sysctlRes.Combined()), "1"))
+			netOpts := []func(*network.CreateOptions){
+				net.WithMacvlan(""),
+				net.WithOption("macvlan_mode", "bridge"),
+				net.WithIPv4(tc.enableIPv4),
+			}
+			if tc.enableIPv6 {
+				netOpts = append(netOpts, net.WithIPv6())
+			}
+
+			const netName = "macvlannet"
+			net.CreateNoError(ctx, t, c, netName, netOpts...)
+			defer c.NetworkRemove(ctx, netName)
+			assert.Check(t, n.IsNetworkAvailable(ctx, c, netName))
+
+			id := container.Run(ctx, t, c, container.WithNetworkMode(netName))
+			defer c.ContainerRemove(ctx, id, containertypes.RemoveOptions{Force: true})
+
+			loRes := container.ExecT(ctx, t, c, id, []string{"ip", "a", "show", "dev", "lo"})
+			assert.Check(t, is.Contains(loRes.Combined(), " inet "))
+			assert.Check(t, is.Contains(loRes.Combined(), " inet6 "))
+
+			eth0Res := container.ExecT(ctx, t, c, id, []string{"ip", "a", "show", "dev", "eth0"})
+			if tc.enableIPv4 || tc.expIPv4 {
+				assert.Check(t, is.Contains(eth0Res.Combined(), " inet "),
+					"Expected IPv4 in: %s", eth0Res.Combined())
+			} else {
+				assert.Check(t, !strings.Contains(eth0Res.Combined(), " inet "),
+					"Expected no IPv4 in: %s", eth0Res.Combined())
+			}
+			if tc.enableIPv6 {
+				assert.Check(t, is.Contains(eth0Res.Combined(), " inet6 "),
+					"Expected IPv6 in: %s", eth0Res.Combined())
+			} else {
+				assert.Check(t, !strings.Contains(eth0Res.Combined(), " inet6 "),
+					"Expected no IPv6 in: %s", eth0Res.Combined())
+			}
+
+			sysctlRes := container.ExecT(ctx, t, c, id, []string{"sysctl", "-n", "net.ipv6.conf.eth0.disable_ipv6"})
+			expDisableIPv6 := "1"
+			if tc.enableIPv6 {
+				expDisableIPv6 = "0"
+			}
+			assert.Check(t, is.Equal(strings.TrimSpace(sysctlRes.Combined()), expDisableIPv6))
+		})
+	}
 }
 
 // TestMACVlanDNS checks whether DNS is forwarded, with/without a parent

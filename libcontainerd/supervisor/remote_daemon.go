@@ -12,7 +12,6 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/defaults"
 	"github.com/containerd/containerd/services/server/config"
-	"github.com/containerd/containerd/sys"
 	"github.com/containerd/log"
 	"github.com/docker/docker/pkg/pidfile"
 	"github.com/docker/docker/pkg/process"
@@ -48,15 +47,6 @@ type remote struct {
 	daemonWaitCh  chan struct{}
 	daemonStartCh chan error
 	daemonStopCh  chan struct{}
-
-	stateDir string
-
-	// oomScore adjusts the OOM score for the containerd process.
-	oomScore int
-
-	// logLevel overrides the containerd logging-level through the --log-level
-	// command-line option.
-	logLevel string
 }
 
 // Daemon represents a running containerd daemon
@@ -71,11 +61,18 @@ type DaemonOpt func(c *remote) error
 // Start starts a containerd daemon and monitors it
 func Start(ctx context.Context, rootDir, stateDir string, opts ...DaemonOpt) (Daemon, error) {
 	r := &remote{
-		stateDir: stateDir,
 		Config: config.Config{
 			Version: 2,
 			Root:    filepath.Join(rootDir, "daemon"),
 			State:   filepath.Join(stateDir, "daemon"),
+			GRPC: config.GRPCConfig{
+				Address:        defaultGRPCAddress(stateDir),
+				MaxRecvMsgSize: defaults.DefaultMaxRecvMsgSize,
+				MaxSendMsgSize: defaults.DefaultMaxSendMsgSize,
+			},
+			Debug: config.Debug{
+				Address: defaultDebugAddress(stateDir),
+			},
 		},
 		configFile:    filepath.Join(stateDir, configFile),
 		daemonPid:     -1,
@@ -90,7 +87,6 @@ func Start(ctx context.Context, rootDir, stateDir string, opts ...DaemonOpt) (Da
 			return nil, err
 		}
 	}
-	r.setDefaults()
 
 	if err := system.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, err
@@ -159,13 +155,8 @@ func (r *remote) startContainerd() error {
 	if err != nil {
 		return err
 	}
-	args := []string{"--config", cfgFile}
 
-	if r.logLevel != "" {
-		args = append(args, "--log-level", r.logLevel)
-	}
-
-	cmd := exec.Command(binaryName, args...)
+	cmd := exec.Command(binaryName, "--config", cfgFile)
 	// redirect containerd logs to docker logs
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -209,10 +200,6 @@ func (r *remote) startContainerd() error {
 
 	r.daemonPid = cmd.Process.Pid
 
-	if err := r.adjustOOMScore(); err != nil {
-		r.logger.WithError(err).Warn("failed to adjust OOM score")
-	}
-
 	if err := pidfile.Write(r.pidFile, r.daemonPid); err != nil {
 		_ = process.Kill(r.daemonPid)
 		return errors.Wrap(err, "libcontainerd: failed to save daemon pid to disk")
@@ -220,18 +207,6 @@ func (r *remote) startContainerd() error {
 
 	r.logger.WithField("pid", r.daemonPid).WithField("address", r.Address()).Infof("started new %s process", binaryName)
 
-	return nil
-}
-
-func (r *remote) adjustOOMScore() error {
-	if r.oomScore == 0 || r.daemonPid <= 1 {
-		// no score configured, or daemonPid contains an invalid PID (we don't
-		// expect containerd to be running as PID 1 :)).
-		return nil
-	}
-	if err := sys.SetOOMScore(r.daemonPid, r.oomScore); err != nil {
-		return errors.Wrap(err, "failed to adjust OOM score for containerd process")
-	}
 	return nil
 }
 

@@ -9,9 +9,10 @@ import (
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/rootfs"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	imageadapter "github.com/docker/docker/builder/builder-next/adapters/containerimage"
 	mobyexporter "github.com/docker/docker/builder/builder-next/exporter"
 	distmetadata "github.com/docker/docker/distribution/metadata"
@@ -353,13 +354,13 @@ func (w *Worker) GetRemotes(ctx context.Context, ref cache.ImmutableRef, createI
 }
 
 // PruneCacheMounts removes the current cache snapshots for specified IDs
-func (w *Worker) PruneCacheMounts(ctx context.Context, ids []string) error {
+func (w *Worker) PruneCacheMounts(ctx context.Context, ids map[string]bool) error {
 	mu := mounts.CacheMountsLocker()
 	mu.Lock()
 	defer mu.Unlock()
 
-	for _, id := range ids {
-		mds, err := mounts.SearchCacheDir(ctx, w.CacheManager(), id)
+	for id, nested := range ids {
+		mds, err := mounts.SearchCacheDir(ctx, w.CacheManager(), id, nested)
 		if err != nil {
 			return err
 		}
@@ -572,5 +573,5 @@ func (p *emptyProvider) ReaderAt(ctx context.Context, dec ocispec.Descriptor) (c
 }
 
 func (p *emptyProvider) Info(ctx context.Context, d digest.Digest) (content.Info, error) {
-	return content.Info{}, errors.Errorf("Info not implemented for empty provider")
+	return content.Info{}, errors.Wrapf(cerrdefs.ErrNotImplemented, "Info not implemented for empty provider")
 }

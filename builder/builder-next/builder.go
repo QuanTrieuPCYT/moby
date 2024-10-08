@@ -10,10 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/platforms"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
+	"github.com/docker/docker/api/types/container"
 	timetypes "github.com/docker/docker/api/types/time"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/builder/builder-next/exporter"
@@ -26,7 +27,6 @@ import (
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/streamformatter"
-	"github.com/docker/go-units"
 	controlapi "github.com/moby/buildkit/api/services/control"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/control"
@@ -94,6 +94,7 @@ type Opt struct {
 	Snapshotter         string
 	ContainerdAddress   string
 	ContainerdNamespace string
+	Callbacks           exporter.BuildkitCallbacks
 }
 
 // Builder can build using BuildKit backend
@@ -392,7 +393,7 @@ func (b *Builder) Build(ctx context.Context, opt backend.BuildConfig) (*builder.
 	req := &controlapi.SolveRequest{
 		Ref: id,
 		Exporters: []*controlapi.Exporter{
-			&controlapi.Exporter{Type: exporterName, Attrs: exporterAttrs},
+			{Type: exporterName, Attrs: exporterAttrs},
 		},
 		Frontend:      "dockerfile.v0",
 		FrontendAttrs: frontendAttrs,
@@ -612,7 +613,7 @@ func toBuildkitExtraHosts(inp []string, hostGatewayIP net.IP) (string, error) {
 }
 
 // toBuildkitUlimits converts ulimits from docker type=soft:hard format to buildkit's csv format
-func toBuildkitUlimits(inp []*units.Ulimit) (string, error) {
+func toBuildkitUlimits(inp []*container.Ulimit) (string, error) {
 	if len(inp) == 0 {
 		return "", nil
 	}

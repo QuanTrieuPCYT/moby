@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/containerd/cgroups/v3"
-	"github.com/containerd/containerd/pkg/userns"
 	"github.com/containerd/log"
 	"github.com/docker/docker/api/types/blkiodev"
 	pblkiodev "github.com/docker/docker/api/types/blkiodev"
@@ -28,6 +27,7 @@ import (
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/daemon/initlayer"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/internal/nlwrap"
 	"github.com/docker/docker/libcontainerd/remote"
 	"github.com/docker/docker/libnetwork"
 	nwconfig "github.com/docker/docker/libnetwork/config"
@@ -916,6 +916,7 @@ func driverOptions(config *config.Config) nwconfig.Option {
 			"EnableIP6Tables":     config.BridgeConfig.EnableIP6Tables,
 			"EnableUserlandProxy": config.BridgeConfig.EnableUserlandProxy,
 			"UserlandProxyPath":   config.BridgeConfig.UserlandProxyPath,
+			"Rootless":            config.Rootless,
 		},
 	})
 }
@@ -1052,6 +1053,7 @@ func initBridgeDriver(controller *libnetwork.Controller, cfg config.BridgeConfig
 	}
 	// Initialize default network on "bridge" with the same name
 	_, err = controller.NewNetwork("bridge", network.NetworkBridge, "",
+		libnetwork.NetworkOptionEnableIPv4(true),
 		libnetwork.NetworkOptionEnableIPv6(cfg.EnableIPv6),
 		libnetwork.NetworkOptionDriverOpts(netOption),
 		libnetwork.NetworkOptionIpam("default", "", v4Conf, v6Conf, nil),
@@ -1064,7 +1066,7 @@ func initBridgeDriver(controller *libnetwork.Controller, cfg config.BridgeConfig
 
 // Remove default bridge interface if present (--bridge=none use case)
 func removeDefaultBridgeInterface() {
-	if lnk, err := netlink.LinkByName(bridge.DefaultBridgeName); err == nil {
+	if lnk, err := nlwrap.LinkByName(bridge.DefaultBridgeName); err == nil {
 		if err := netlink.LinkDel(lnk); err != nil {
 			log.G(context.TODO()).Warnf("Failed to remove bridge interface (%s): %v", bridge.DefaultBridgeName, err)
 		}
@@ -1401,35 +1403,6 @@ func (daemon *Daemon) conditionalUnmountOnCleanup(container *container.Container
 // daemon to run in. This is only applicable on Windows
 func (daemon *Daemon) setDefaultIsolation(*config.Config) error {
 	return nil
-}
-
-// This is used to allow removal of mountpoints that may be mounted in other
-// namespaces on RHEL based kernels starting from RHEL 7.4.
-// Without this setting, removals on these RHEL based kernels may fail with
-// "device or resource busy".
-// This setting is not available in upstream kernels as it is not configurable,
-// but has been in the upstream kernels since 3.15.
-func setMayDetachMounts() error {
-	f, err := os.OpenFile("/proc/sys/fs/may_detach_mounts", os.O_WRONLY, 0)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return errors.Wrap(err, "error opening may_detach_mounts kernel config file")
-	}
-	defer f.Close()
-
-	_, err = f.WriteString("1")
-	if os.IsPermission(err) {
-		// Setting may_detach_mounts does not work in an
-		// unprivileged container. Ignore the error, but log
-		// it if we appear not to be in that situation.
-		if !userns.RunningInUserNS() {
-			log.G(context.TODO()).Debugf("Permission denied writing %q to /proc/sys/fs/may_detach_mounts", "1")
-		}
-		return nil
-	}
-	return err
 }
 
 func (daemon *Daemon) initCPURtController(cfg *config.Config, mnt, path string) error {

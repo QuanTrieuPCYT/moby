@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -119,7 +119,7 @@ func (c *Client) solve(ctx context.Context, def *llb.Definition, runGateway runG
 		if opt.SessionPreInitialized {
 			return nil, errors.Errorf("no session provided for preinitialized option")
 		}
-		s, err = session.NewSession(statusContext, defaultSessionName(), opt.SharedKey)
+		s, err = session.NewSession(statusContext, opt.SharedKey)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create session")
 		}
@@ -219,13 +219,8 @@ func (c *Client) solve(ctx context.Context, def *llb.Definition, runGateway runG
 		})
 	}
 
-	frontendAttrs := map[string]string{}
-	for k, v := range opt.FrontendAttrs {
-		frontendAttrs[k] = v
-	}
-	for k, v := range cacheOpt.frontendAttrs {
-		frontendAttrs[k] = v
-	}
+	frontendAttrs := maps.Clone(opt.FrontendAttrs)
+	maps.Copy(frontendAttrs, cacheOpt.frontendAttrs)
 
 	solveCtx, cancelSolve := context.WithCancelCause(ctx)
 	var res *SolveResponse
@@ -421,14 +416,6 @@ func prepareSyncedFiles(def *llb.Definition, localMounts map[string]fsutil.FS) (
 		}
 	}
 	return result, nil
-}
-
-func defaultSessionName() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "unknown"
-	}
-	return filepath.Base(wd)
 }
 
 type cacheOptions struct {

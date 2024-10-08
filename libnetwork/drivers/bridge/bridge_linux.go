@@ -5,27 +5,28 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
-	"os/exec"
 	"strconv"
 	"sync"
 
 	"github.com/containerd/log"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/internal/nlwrap"
 	"github.com/docker/docker/libnetwork/datastore"
 	"github.com/docker/docker/libnetwork/driverapi"
+	"github.com/docker/docker/libnetwork/drivers/bridge/internal/rlkclient"
 	"github.com/docker/docker/libnetwork/internal/netiputil"
 	"github.com/docker/docker/libnetwork/iptables"
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/options"
-	"github.com/docker/docker/libnetwork/portallocator"
-	"github.com/docker/docker/libnetwork/portmapper"
 	"github.com/docker/docker/libnetwork/scope"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/pkg/errors"
 	"github.com/vishvananda/netlink"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -55,6 +56,7 @@ type configuration struct {
 	EnableIP6Tables     bool
 	EnableUserlandProxy bool
 	UserlandProxyPath   string
+	Rootless            bool
 }
 
 // networkConfiguration for network specific configuration
@@ -63,6 +65,8 @@ type networkConfiguration struct {
 	BridgeName           string
 	EnableIPv6           bool
 	EnableIPMasquerade   bool
+	GwModeIPv4           gwMode
+	GwModeIPv6           gwMode
 	EnableICC            bool
 	InhibitIPv4          bool
 	Mtu                  int
@@ -113,7 +117,7 @@ type bridgeEndpoint struct {
 	macAddress      net.HardwareAddr
 	containerConfig *containerConfiguration
 	extConnConfig   *connectivityConfiguration
-	portMapping     []types.PortBinding // Operation port bindings
+	portMapping     []portBinding // Operational port bindings
 	dbIndex         uint64
 	dbExists        bool
 }
@@ -123,11 +127,19 @@ type bridgeNetwork struct {
 	bridge        *bridgeInterface // The bridge's L3 interface
 	config        *networkConfiguration
 	endpoints     map[string]*bridgeEndpoint // key: endpoint id
-	portMapper    *portmapper.PortMapper
-	portMapperV6  *portmapper.PortMapper
-	driver        *driver // The network's driver
+	driver        *driver                    // The network's driver
 	iptCleanFuncs iptablesCleanFuncs
 	sync.Mutex
+}
+
+type portDriverClient interface {
+	ChildHostIP(hostIP netip.Addr) netip.Addr
+	AddPort(ctx context.Context, proto string, hostIP, childIP netip.Addr, hostPort int) (func() error, error)
+}
+
+// Allow unit tests to supply a dummy RootlessKit port driver client.
+var newPortDriverClient = func(ctx context.Context) (portDriverClient, error) {
+	return rlkclient.NewPortDriverClient(ctx)
 }
 
 type driver struct {
@@ -142,17 +154,24 @@ type driver struct {
 	isolationChain2V6 *iptables.ChainInfo
 	networks          map[string]*bridgeNetwork
 	store             *datastore.Store
-	nlh               *netlink.Handle
+	nlh               nlwrap.Handle
+	portDriverClient  portDriverClient
 	configNetwork     sync.Mutex
-	portAllocator     *portallocator.PortAllocator // Overridable for tests.
 	sync.Mutex
 }
+
+type gwMode string
+
+const (
+	gwModeDefault gwMode = ""
+	gwModeNAT     gwMode = "nat"
+	gwModeRouted  gwMode = "routed"
+)
 
 // New constructs a new bridge driver
 func newDriver() *driver {
 	return &driver{
-		networks:      map[string]*bridgeNetwork{},
-		portAllocator: portallocator.Get(),
+		networks: map[string]*bridgeNetwork{},
 	}
 }
 
@@ -292,6 +311,14 @@ func (c *networkConfiguration) fromLabels(labels map[string]string) error {
 			if c.EnableIPMasquerade, err = strconv.ParseBool(value); err != nil {
 				return parseErr(label, value, err.Error())
 			}
+		case IPv4GatewayMode:
+			if c.GwModeIPv4, err = newGwMode(value); err != nil {
+				return parseErr(label, value, err.Error())
+			}
+		case IPv6GatewayMode:
+			if c.GwModeIPv6, err = newGwMode(value); err != nil {
+				return parseErr(label, value, err.Error())
+			}
 		case EnableICC:
 			if c.EnableICC, err = strconv.ParseBool(value); err != nil {
 				return parseErr(label, value, err.Error())
@@ -324,12 +351,41 @@ func (c *networkConfiguration) fromLabels(labels map[string]string) error {
 	return nil
 }
 
+func newGwMode(gwMode string) (gwMode, error) {
+	switch gwMode {
+	case "nat":
+		return gwModeNAT, nil
+	case "routed":
+		return gwModeRouted, nil
+	}
+	return gwModeDefault, fmt.Errorf("unknown gateway mode %s", gwMode)
+}
+
+func (m gwMode) natDisabled() bool {
+	return m == gwModeRouted
+}
+
 func parseErr(label, value, errString string) error {
 	return types.InvalidParameterErrorf("failed to parse %s value: %v (%s)", label, value, errString)
 }
 
 func (n *bridgeNetwork) registerIptCleanFunc(clean iptableCleanFunc) {
 	n.iptCleanFuncs = append(n.iptCleanFuncs, clean)
+}
+
+func (n *bridgeNetwork) iptablesEnabled(version iptables.IPVersion) (bool, error) {
+	n.Lock()
+	defer n.Unlock()
+	if n.driver == nil {
+		return false, types.InvalidParameterErrorf("no driver found")
+	}
+
+	n.driver.Lock()
+	defer n.driver.Unlock()
+	if version == iptables.IPv6 {
+		return n.driver.config.EnableIP6Tables, nil
+	}
+	return n.driver.config.EnableIPTables, nil
 }
 
 func (n *bridgeNetwork) getDriverChains(version iptables.IPVersion) (*iptables.ChainInfo, *iptables.ChainInfo, *iptables.ChainInfo, *iptables.ChainInfo, error) {
@@ -353,6 +409,30 @@ func (n *bridgeNetwork) getNetworkBridgeName() string {
 	n.Unlock()
 
 	return config.BridgeName
+}
+
+func (n *bridgeNetwork) getNATDisabled() (ipv4, ipv6 bool) {
+	n.Lock()
+	defer n.Unlock()
+	return n.config.GwModeIPv4.natDisabled(), n.config.GwModeIPv6.natDisabled()
+}
+
+func (n *bridgeNetwork) userlandProxyPath() string {
+	n.Lock()
+	defer n.Unlock()
+	if n.driver == nil {
+		return ""
+	}
+	return n.driver.userlandProxyPath()
+}
+
+func (n *bridgeNetwork) getPortDriverClient() portDriverClient {
+	n.Lock()
+	defer n.Unlock()
+	if n.driver == nil {
+		return nil
+	}
+	return n.driver.getPortDriverClient()
 }
 
 func (n *bridgeNetwork) getEndpoint(eid string) (*bridgeEndpoint, error) {
@@ -406,6 +486,7 @@ func (d *driver) configure(option map[string]interface{}) error {
 		filterChainV6     *iptables.ChainInfo
 		isolationChain1V6 *iptables.ChainInfo
 		isolationChain2V6 *iptables.ChainInfo
+		pdc               portDriverClient
 	)
 
 	switch opt := option[netlabel.GenericData].(type) {
@@ -421,14 +502,6 @@ func (d *driver) configure(option map[string]interface{}) error {
 		// No GenericData option set. Use defaults.
 	default:
 		return &ErrInvalidDriverConfig{}
-	}
-
-	if config.EnableIPTables || config.EnableIP6Tables {
-		if _, err := os.Stat("/proc/sys/net/bridge"); err != nil {
-			if out, err := exec.Command("modprobe", "-va", "bridge", "br_netfilter").CombinedOutput(); err != nil {
-				log.G(context.TODO()).Warnf("Running modprobe bridge br_netfilter failed with message: %s, error: %v", out, err)
-			}
-		}
 	}
 
 	if config.EnableIPTables {
@@ -478,6 +551,14 @@ func (d *driver) configure(option map[string]interface{}) error {
 		}
 	}
 
+	if config.Rootless {
+		var err error
+		pdc, err = newPortDriverClient(context.TODO())
+		if err != nil {
+			return err
+		}
+	}
+
 	d.Lock()
 	d.natChain = natChain
 	d.filterChain = filterChain
@@ -487,6 +568,7 @@ func (d *driver) configure(option map[string]interface{}) error {
 	d.filterChainV6 = filterChainV6
 	d.isolationChain1V6 = isolationChain1V6
 	d.isolationChain2V6 = isolationChain2V6
+	d.portDriverClient = pdc
 	d.config = config
 	d.Unlock()
 
@@ -506,6 +588,22 @@ func (d *driver) getNetwork(id string) (*bridgeNetwork, error) {
 	}
 
 	return nil, types.NotFoundErrorf("network not found: %s", id)
+}
+
+func (d *driver) userlandProxyPath() string {
+	d.Lock()
+	defer d.Unlock()
+
+	if d.config.EnableUserlandProxy {
+		return d.config.UserlandProxyPath
+	}
+	return ""
+}
+
+func (d *driver) getPortDriverClient() portDriverClient {
+	d.Lock()
+	defer d.Unlock()
+	return d.portDriverClient
 }
 
 func parseNetworkGenericOptions(data interface{}) (*networkConfiguration, error) {
@@ -681,7 +779,7 @@ func (d *driver) CreateNetwork(id string, option map[string]interface{}, nInfo d
 		return err
 	}
 
-	return d.storeUpdate(config)
+	return d.storeUpdate(context.TODO(), config)
 }
 
 func (d *driver) checkConflict(config *networkConfiguration) error {
@@ -701,7 +799,7 @@ func (d *driver) checkConflict(config *networkConfiguration) error {
 func (d *driver) createNetwork(config *networkConfiguration) (err error) {
 	// Initialize handle when needed
 	d.Lock()
-	if d.nlh == nil {
+	if d.nlh.Handle == nil {
 		d.nlh = ns.NlHandle()
 	}
 	d.Unlock()
@@ -714,13 +812,11 @@ func (d *driver) createNetwork(config *networkConfiguration) (err error) {
 
 	// Create and set network handler in driver
 	network := &bridgeNetwork{
-		id:           config.ID,
-		endpoints:    make(map[string]*bridgeEndpoint),
-		config:       config,
-		portMapper:   portmapper.NewWithPortAllocator(d.portAllocator, d.config.UserlandProxyPath),
-		portMapperV6: portmapper.NewWithPortAllocator(d.portAllocator, d.config.UserlandProxyPath),
-		bridge:       bridgeIface,
-		driver:       d,
+		id:        config.ID,
+		endpoints: make(map[string]*bridgeEndpoint),
+		config:    config,
+		bridge:    bridgeIface,
+		driver:    d,
 	}
 
 	d.Lock()
@@ -859,7 +955,7 @@ func (d *driver) deleteNetwork(nid string) error {
 	config := n.config
 	n.Unlock()
 
-	// delele endpoints belong to this network
+	// delete endpoints belong to this network
 	for _, ep := range n.endpoints {
 		if err := n.releasePorts(ep); err != nil {
 			log.G(context.TODO()).Warn(err)
@@ -913,19 +1009,24 @@ func (d *driver) deleteNetwork(nid string) error {
 	return d.storeDelete(config)
 }
 
-func addToBridge(nlh *netlink.Handle, ifaceName, bridgeName string) error {
+func addToBridge(ctx context.Context, nlh nlwrap.Handle, ifaceName, bridgeName string) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.bridge.addToBridge", trace.WithAttributes(
+		attribute.String("ifaceName", ifaceName),
+		attribute.String("bridgeName", bridgeName)))
+	defer span.End()
+
 	lnk, err := nlh.LinkByName(ifaceName)
 	if err != nil {
 		return fmt.Errorf("could not find interface %s: %v", ifaceName, err)
 	}
 	if err := nlh.LinkSetMaster(lnk, &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: bridgeName}}); err != nil {
-		log.G(context.TODO()).WithError(err).Errorf("Failed to add %s to bridge via netlink", ifaceName)
+		log.G(ctx).WithError(err).Errorf("Failed to add %s to bridge via netlink", ifaceName)
 		return err
 	}
 	return nil
 }
 
-func setHairpinMode(nlh *netlink.Handle, link netlink.Link, enable bool) error {
+func setHairpinMode(nlh nlwrap.Handle, link netlink.Link, enable bool) error {
 	err := nlh.LinkSetHairpin(link, enable)
 	if err != nil {
 		return fmt.Errorf("unable to set hairpin mode on %s via netlink: %v",
@@ -934,10 +1035,15 @@ func setHairpinMode(nlh *netlink.Handle, link netlink.Link, enable bool) error {
 	return nil
 }
 
-func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo, _ map[string]interface{}) error {
+func (d *driver) CreateEndpoint(ctx context.Context, nid, eid string, ifInfo driverapi.InterfaceInfo, _ map[string]interface{}) error {
 	if ifInfo == nil {
 		return errors.New("invalid interface info passed")
 	}
+
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.bridge.CreateEndpoint", trace.WithAttributes(
+		attribute.String("nid", nid),
+		attribute.String("eid", eid)))
+	defer span.End()
 
 	// Get the network handler and make sure it exists
 	d.Lock()
@@ -1015,7 +1121,7 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	defer func() {
 		if err != nil {
 			if err := d.nlh.LinkDel(host); err != nil {
-				log.G(context.TODO()).WithError(err).Warnf("Failed to delete host side interface (%s)'s link", hostIfName)
+				log.G(ctx).WithError(err).Warnf("Failed to delete host side interface (%s)'s link", hostIfName)
 			}
 		}
 	}()
@@ -1028,7 +1134,7 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	defer func() {
 		if err != nil {
 			if err := d.nlh.LinkDel(sbox); err != nil {
-				log.G(context.TODO()).WithError(err).Warnf("Failed to delete sandbox side interface (%s)'s link", containerIfName)
+				log.G(ctx).WithError(err).Warnf("Failed to delete sandbox side interface (%s)'s link", containerIfName)
 			}
 		}
 	}()
@@ -1050,7 +1156,7 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	}
 
 	// Attach host side pipe interface into the bridge
-	if err = addToBridge(d.nlh, hostIfName, config.BridgeName); err != nil {
+	if err = addToBridge(ctx, d.nlh, hostIfName, config.BridgeName); err != nil {
 		return fmt.Errorf("adding interface %s to bridge %s failed: %v", hostIfName, config.BridgeName, err)
 	}
 
@@ -1078,7 +1184,7 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	}
 
 	// Up the host interface after finishing all netlink configuration
-	if err = d.nlh.LinkSetUp(host); err != nil {
+	if err = d.linkUp(ctx, host); err != nil {
 		return fmt.Errorf("could not set link up for host interface %s: %v", hostIfName, err)
 	}
 
@@ -1106,11 +1212,19 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 		}
 	}
 
-	if err = d.storeUpdate(endpoint); err != nil {
+	if err = d.storeUpdate(ctx, endpoint); err != nil {
 		return fmt.Errorf("failed to save bridge endpoint %.7s to store: %v", endpoint.id, err)
 	}
 
 	return nil
+}
+
+func (d *driver) linkUp(ctx context.Context, host netlink.Link) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.bridge.linkUp", trace.WithAttributes(
+		attribute.String("host", host.Attrs().Name)))
+	defer span.End()
+
+	return d.nlh.LinkSetUp(host)
 }
 
 func (d *driver) DeleteEndpoint(nid, eid string) error {
@@ -1221,7 +1335,7 @@ func (d *driver) EndpointOperInfo(nid, eid string) (map[string]interface{}, erro
 		// Return a copy of the operational data
 		pmc := make([]types.PortBinding, 0, len(ep.portMapping))
 		for _, pm := range ep.portMapping {
-			pmc = append(pmc, pm.GetCopy())
+			pmc = append(pmc, pm.PortBinding.GetCopy())
 		}
 		m[netlabel.PortMap] = pmc
 	}
@@ -1234,7 +1348,13 @@ func (d *driver) EndpointOperInfo(nid, eid string) (map[string]interface{}, erro
 }
 
 // Join method is invoked when a Sandbox is attached to an endpoint.
-func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
+func (d *driver) Join(ctx context.Context, nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.bridge.Join", trace.WithAttributes(
+		attribute.String("nid", nid),
+		attribute.String("eid", eid),
+		attribute.String("sboxKey", sboxKey)))
+	defer span.End()
+
 	network, err := d.getNetwork(nid)
 	if err != nil {
 		return err
@@ -1300,7 +1420,12 @@ func (d *driver) Leave(nid, eid string) error {
 	return nil
 }
 
-func (d *driver) ProgramExternalConnectivity(nid, eid string, options map[string]interface{}) error {
+func (d *driver) ProgramExternalConnectivity(ctx context.Context, nid, eid string, options map[string]interface{}) error {
+	ctx, span := otel.Tracer("").Start(ctx, "libnetwork.drivers.bridge.ProgramExternalConnectivity", trace.WithAttributes(
+		attribute.String("nid", nid),
+		attribute.String("eid", eid)))
+	defer span.End()
+
 	network, err := d.getNetwork(nid)
 	if err != nil {
 		return err
@@ -1321,15 +1446,22 @@ func (d *driver) ProgramExternalConnectivity(nid, eid string, options map[string
 	}
 
 	// Program any required port mapping and store them in the endpoint
-	endpoint.portMapping, err = network.allocatePorts(endpoint, network.config.DefaultBindingIP, d.config.EnableUserlandProxy)
-	if err != nil {
-		return err
+	if endpoint.extConnConfig != nil && endpoint.extConnConfig.PortBindings != nil {
+		endpoint.portMapping, err = network.addPortMappings(
+			endpoint.addr,
+			endpoint.addrv6,
+			endpoint.extConnConfig.PortBindings,
+			network.config.DefaultBindingIP,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	defer func() {
 		if err != nil {
 			if e := network.releasePorts(endpoint); e != nil {
-				log.G(context.TODO()).Errorf("Failed to release ports allocated for the bridge endpoint %s on failure %v because of %v",
+				log.G(ctx).Errorf("Failed to release ports allocated for the bridge endpoint %s on failure %v because of %v",
 					eid, err, e)
 			}
 			endpoint.portMapping = nil
@@ -1340,7 +1472,7 @@ func (d *driver) ProgramExternalConnectivity(nid, eid string, options map[string
 	// be bound to the local proxy, or to the host (for UDP packets), and won't be redirected to the new endpoints.
 	clearConntrackEntries(d.nlh, endpoint)
 
-	if err = d.storeUpdate(endpoint); err != nil {
+	if err = d.storeUpdate(ctx, endpoint); err != nil {
 		return fmt.Errorf("failed to update bridge endpoint %.7s to store: %v", endpoint.id, err)
 	}
 
@@ -1378,7 +1510,7 @@ func (d *driver) RevokeExternalConnectivity(nid, eid string) error {
 	// to bad NATing.
 	clearConntrackEntries(d.nlh, endpoint)
 
-	if err = d.storeUpdate(endpoint); err != nil {
+	if err = d.storeUpdate(context.TODO(), endpoint); err != nil {
 		return fmt.Errorf("failed to update bridge endpoint %.7s to store: %v", endpoint.id, err)
 	}
 

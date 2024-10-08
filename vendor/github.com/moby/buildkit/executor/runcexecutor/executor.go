@@ -219,7 +219,7 @@ func (w *runcExecutor) Run(ctx context.Context, id string, root executor.Mount, 
 	bundle := filepath.Join(w.root, id)
 
 	if err := os.Mkdir(bundle, 0o711); err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	defer os.RemoveAll(bundle)
 
@@ -230,23 +230,23 @@ func (w *runcExecutor) Run(ctx context.Context, id string, root executor.Mount, 
 
 	rootFSPath := filepath.Join(bundle, "rootfs")
 	if err := idtools.MkdirAllAndChown(rootFSPath, 0o700, identity); err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	if err := mount.All(rootMount, rootFSPath); err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	defer mount.Unmount(rootFSPath, 0)
 
-	defer executor.MountStubsCleaner(ctx, rootFSPath, mounts, meta.RemoveMountStubsRecursive)()
+	defer executor.MountStubsCleaner(context.WithoutCancel(ctx), rootFSPath, mounts, meta.RemoveMountStubsRecursive)()
 
 	uid, gid, sgids, err := oci.GetUser(rootFSPath, meta.User)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 
 	f, err := os.Create(filepath.Join(bundle, "config.json"))
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	defer f.Close()
 
@@ -297,7 +297,7 @@ func (w *runcExecutor) Run(ctx context.Context, id string, root executor.Mount, 
 	}
 
 	if err := json.NewEncoder(f).Encode(spec); err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 
 	bklog.G(ctx).Debugf("> creating %s %v", id, meta.Args)
@@ -335,7 +335,7 @@ func (w *runcExecutor) Run(ctx context.Context, id string, root executor.Mount, 
 	}
 	doReleaseNetwork = false
 
-	err = exitError(ctx, err)
+	err = exitError(ctx, cgroupPath, err)
 	if err != nil {
 		if rec != nil {
 			rec.Close()
@@ -351,7 +351,7 @@ func (w *runcExecutor) Run(ctx context.Context, id string, root executor.Mount, 
 	return rec, rec.CloseAsync(releaseContainer)
 }
 
-func exitError(ctx context.Context, err error) error {
+func exitError(ctx context.Context, cgroupPath string, err error) error {
 	if err != nil {
 		exitErr := &gatewayapi.ExitError{
 			ExitCode: gatewayapi.UnknownExitStatus,
@@ -363,6 +363,9 @@ func exitError(ctx context.Context, err error) error {
 				ExitCode: uint32(runcExitError.Status),
 			}
 		}
+
+		detectOOM(ctx, cgroupPath, exitErr)
+
 		trace.SpanFromContext(ctx).AddEvent(
 			"Container exited",
 			trace.WithAttributes(
@@ -371,7 +374,7 @@ func exitError(ctx context.Context, err error) error {
 		)
 		select {
 		case <-ctx.Done():
-			exitErr.Err = errors.Wrapf(context.Cause(ctx), exitErr.Error())
+			exitErr.Err = errors.Wrap(context.Cause(ctx), exitErr.Error())
 			return exitErr
 		default:
 			return stack.Enable(exitErr)
@@ -422,8 +425,12 @@ func (w *runcExecutor) Exec(ctx context.Context, id string, process executor.Pro
 	defer f.Close()
 
 	spec := &specs.Spec{}
-	if err := json.NewDecoder(f).Decode(spec); err != nil {
+	dec := json.NewDecoder(f)
+	if err := dec.Decode(spec); err != nil {
 		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errors.Errorf("unexpected data after JSON spec object")
 	}
 
 	if process.Meta.User != "" {
@@ -449,7 +456,7 @@ func (w *runcExecutor) Exec(ctx context.Context, id string, process executor.Pro
 	}
 
 	err = w.exec(ctx, id, spec.Process, process, nil)
-	return exitError(ctx, err)
+	return exitError(ctx, "", err)
 }
 
 type forwardIO struct {
@@ -610,9 +617,14 @@ func runcProcessHandle(ctx context.Context, killer procKiller) (*procHandle, con
 	go func() {
 		// Wait for pid
 		select {
-		case <-ctx.Done():
+		case <-p.ended:
 			return // nothing to kill
 		case <-p.ready:
+			select {
+			case <-p.ended:
+				return
+			default:
+			}
 		}
 
 		for {

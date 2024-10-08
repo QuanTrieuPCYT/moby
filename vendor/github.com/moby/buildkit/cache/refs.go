@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,6 @@ import (
 	"github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/pkg/userns"
 	"github.com/containerd/containerd/snapshots"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/pkg/idtools"
@@ -33,6 +33,7 @@ import (
 	rootlessmountopts "github.com/moby/buildkit/util/rootless/mountopts"
 	"github.com/moby/buildkit/util/winlayers"
 	"github.com/moby/sys/mountinfo"
+	"github.com/moby/sys/userns"
 	digest "github.com/opencontainers/go-digest"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -727,9 +728,7 @@ func (sr *immutableRef) ociDesc(ctx context.Context, dhs DescHandlers, preferNon
 		}
 	} else if dh, ok := dhs[desc.Digest]; ok {
 		// No blob metadtata is stored in the content store. Try to get annotations from desc handlers.
-		for k, v := range filterAnnotationsForSave(dh.Annotations) {
-			desc.Annotations[k] = v
-		}
+		maps.Copy(desc.Annotations, filterAnnotationsForSave(dh.Annotations))
 	}
 
 	diffID := sr.getDiffID()
@@ -1045,6 +1044,7 @@ func (sr *immutableRef) withRemoteSnapshotLabelsStargzMode(ctx context.Context, 
 			return errors.Wrapf(err, "failed to add tmp remote labels for remote snapshot")
 		}
 		defer func() {
+			ctx := context.WithoutCancel(ctx)
 			for k := range info.Labels {
 				info.Labels[k] = "" // Remove labels appended in this call
 			}
@@ -1106,6 +1106,7 @@ func (sr *immutableRef) prepareRemoteSnapshotsStargzMode(ctx context.Context, s 
 					info, err := r.cm.Snapshotter.Stat(ctx, snapshotID)
 					if err == nil { // usable as remote snapshot without unlazying.
 						defer func() {
+							ctx := context.WithoutCancel(ctx)
 							// Remove tmp labels appended in this func
 							if info.Labels != nil {
 								for k := range tmpLabels {

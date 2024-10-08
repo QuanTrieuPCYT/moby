@@ -11,9 +11,9 @@ import (
 	containerdimages "github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/images/archive"
 	"github.com/containerd/containerd/leases"
-	"github.com/containerd/containerd/platforms"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/container"
@@ -47,8 +47,9 @@ func (i *ImageService) PerformWithBaseFS(ctx context.Context, c *container.Conta
 // outStream is the writer which the images are written to.
 //
 // TODO(thaJeztah): produce JSON stream progress response and image events; see https://github.com/moby/moby/issues/43910
-func (i *ImageService) ExportImage(ctx context.Context, names []string, outStream io.Writer) error {
-	platform := matchAllWithPreference(platforms.Default())
+func (i *ImageService) ExportImage(ctx context.Context, names []string, platform *ocispec.Platform, outStream io.Writer) error {
+	pm := i.matchRequestedOrDefault(platforms.OnlyStrict, platform)
+
 	opts := []archive.ExportOpt{
 		archive.WithSkipNonDistributableBlobs(),
 
@@ -61,9 +62,9 @@ func (i *ImageService) ExportImage(ctx context.Context, names []string, outStrea
 		//  Daemon is running on linux/arm64
 		//  When we export linux/amd64 and linux/arm64, manifest.json will point to linux/arm64.
 		//  When we export linux/amd64 only, manifest.json will point to linux/amd64.
-		// Note: This is only applicable if importing this archive into non-containerd Docker.
+		// Note: This only matters when importing this archive into non-containerd Docker.
 		// Importing the same archive into containerd, will not restrict the platforms.
-		archive.WithPlatform(platform),
+		archive.WithPlatform(pm),
 		archive.WithSkipMissing(i.content),
 	}
 
@@ -82,7 +83,17 @@ func (i *ImageService) ExportImage(ctx context.Context, names []string, outStrea
 		return leaseContent(ctx, i.content, leasesManager, lease, target)
 	}
 
-	exportImage := func(ctx context.Context, target ocispec.Descriptor, ref reference.Named) error {
+	exportImage := func(ctx context.Context, img containerdimages.Image, ref reference.Named) error {
+		target := img.Target
+
+		if platform != nil {
+			newTarget, err := i.getPushDescriptor(ctx, img, platform)
+			if err != nil {
+				return errors.Wrap(err, "no suitable export target found for platform "+platforms.FormatAll(*platform))
+			}
+			target = newTarget
+		}
+
 		if err := addLease(ctx, target); err != nil {
 			return err
 		}
@@ -131,7 +142,6 @@ func (i *ImageService) ExportImage(ctx context.Context, names []string, outStrea
 
 		for _, img := range imgs {
 			ref, err := reference.ParseNamed(img.Name)
-
 			if err != nil {
 				log.G(ctx).WithFields(log.Fields{
 					"image": img.Name,
@@ -140,7 +150,7 @@ func (i *ImageService) ExportImage(ctx context.Context, names []string, outStrea
 				continue
 			}
 
-			if err := exportImage(ctx, img.Target, ref); err != nil {
+			if err := exportImage(ctx, img, ref); err != nil {
 				return err
 			}
 		}
@@ -149,19 +159,20 @@ func (i *ImageService) ExportImage(ctx context.Context, names []string, outStrea
 	}
 
 	for _, name := range names {
-		target, resolveErr := i.resolveDescriptor(ctx, name)
+		img, resolveErr := i.resolveImage(ctx, name)
 
 		// Check if the requested name is a truncated digest of the resolved descriptor.
 		// If yes, that means that the user specified a specific image ID so
 		// it's not referencing a repository.
 		specificDigestResolved := false
 		if resolveErr == nil {
-			nameWithoutDigestAlgorithm := strings.TrimPrefix(name, target.Digest.Algorithm().String()+":")
-			specificDigestResolved = strings.HasPrefix(target.Digest.Encoded(), nameWithoutDigestAlgorithm)
+			nameWithoutDigestAlgorithm := strings.TrimPrefix(name, img.Target.Digest.Algorithm().String()+":")
+			specificDigestResolved = strings.HasPrefix(img.Target.Digest.Encoded(), nameWithoutDigestAlgorithm)
 		}
 
 		log.G(ctx).WithFields(log.Fields{
 			"name":                   name,
+			"img":                    img,
 			"resolveErr":             resolveErr,
 			"specificDigestResolved": specificDigestResolved,
 		}).Debug("export requested")
@@ -197,7 +208,8 @@ func (i *ImageService) ExportImage(ctx context.Context, names []string, outStrea
 		if specificDigestResolved {
 			ref = nil
 		}
-		if err := exportImage(ctx, target, ref); err != nil {
+
+		if err := exportImage(ctx, img, ref); err != nil {
 			return err
 		}
 	}
@@ -232,16 +244,17 @@ func leaseContent(ctx context.Context, store content.Store, leasesManager leases
 // LoadImage uploads a set of images into the repository. This is the
 // complement of ExportImage.  The input stream is an uncompressed tar
 // ball containing images and metadata.
-func (i *ImageService) LoadImage(ctx context.Context, inTar io.ReadCloser, outStream io.Writer, quiet bool) error {
+func (i *ImageService) LoadImage(ctx context.Context, inTar io.ReadCloser, platform *ocispec.Platform, outStream io.Writer, quiet bool) error {
 	decompressed, err := dockerarchive.DecompressStream(inTar)
 	if err != nil {
 		return errors.Wrap(err, "failed to decompress input tar archive")
 	}
 	defer decompressed.Close()
 
+	pm := i.matchRequestedOrDefault(platforms.OnlyStrict, platform)
+
 	opts := []containerd.ImportOpt{
-		// TODO(vvoland): Allow user to pass platform
-		containerd.WithImportPlatform(platforms.All),
+		containerd.WithImportPlatform(pm),
 
 		containerd.WithSkipMissing(),
 
@@ -291,6 +304,17 @@ func (i *ImageService) LoadImage(ctx context.Context, inTar io.ReadCloser, outSt
 				return nil
 			}
 
+			imgPlat, err := platformImg.ImagePlatform(ctx)
+			if err != nil {
+				logger.WithError(err).Warn("failed to read image platform, skipping unpack")
+				return nil
+			}
+
+			// Only unpack the image if it matches the host platform
+			if !i.hostPlatformMatcher().Match(imgPlat) {
+				return nil
+			}
+
 			unpacked, err := platformImg.IsUnpacked(ctx, i.snapshotter)
 			if err != nil {
 				logger.WithError(err).Warn("failed to check if image is unpacked")
@@ -299,7 +323,6 @@ func (i *ImageService) LoadImage(ctx context.Context, inTar io.ReadCloser, outSt
 
 			if !unpacked {
 				err = platformImg.Unpack(ctx, i.snapshotter)
-
 				if err != nil {
 					return errdefs.System(err)
 				}
@@ -307,12 +330,14 @@ func (i *ImageService) LoadImage(ctx context.Context, inTar io.ReadCloser, outSt
 			logger.WithField("alreadyUnpacked", unpacked).WithError(err).Debug("unpack")
 			return nil
 		})
-		if err != nil {
-			return errors.Wrap(err, "failed to unpack loaded image")
-		}
 
 		fmt.Fprintf(progress, "%s: %s\n", loadedMsg, name)
 		i.LogImageEvent(img.Target.Digest.String(), img.Target.Digest.String(), events.ActionLoad)
+
+		if err != nil {
+			// The image failed to unpack, but is already imported, log the error but don't fail the whole load.
+			fmt.Fprintf(progress, "Error unpacking image %s: %v\n", name, err)
+		}
 	}
 
 	return nil

@@ -5,33 +5,42 @@ import (
 	"time"
 
 	containerdimages "github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	imagetype "github.com/docker/docker/api/types/image"
 	dimages "github.com/docker/docker/daemon/images"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
 
 // ImageHistory returns a slice of HistoryResponseItem structures for the
 // specified image name by walking the image lineage.
-func (i *ImageService) ImageHistory(ctx context.Context, name string) ([]*imagetype.HistoryResponseItem, error) {
+func (i *ImageService) ImageHistory(ctx context.Context, name string, platform *ocispec.Platform) ([]*imagetype.HistoryResponseItem, error) {
 	start := time.Now()
 	img, err := i.resolveImage(ctx, name)
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO: pass platform in from the CLI
-	platform := matchAllWithPreference(platforms.Default())
+	pm := i.matchRequestedOrDefault(platforms.Only, platform)
 
-	presentImages, err := i.presentImages(ctx, img, name, platform)
+	im, err := i.getBestPresentImageManifest(ctx, img, pm)
 	if err != nil {
 		return nil, err
 	}
-	ociImage := presentImages[0]
+
+	// Subset of ocispec.Image
+	var ociImage struct {
+		RootFS  ocispec.RootFS    `json:"rootfs"`
+		History []ocispec.History `json:"history,omitempty"`
+	}
+	err = im.ReadConfig(ctx, &ociImage)
+	if err != nil {
+		return nil, err
+	}
 
 	var (
 		history []*imagetype.HistoryResponseItem

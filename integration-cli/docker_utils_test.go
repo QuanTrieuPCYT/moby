@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/daemon"
@@ -131,18 +132,18 @@ func inspectMountSourceField(name, destination string) (string, error) {
 var errMountNotFound = errors.New("mount point not found")
 
 // Deprecated: use cli.Docker
-func inspectMountPoint(name, destination string) (types.MountPoint, error) {
+func inspectMountPoint(name, destination string) (container.MountPoint, error) {
 	out, err := inspectFilter(name, "json .Mounts")
 	if err != nil {
-		return types.MountPoint{}, err
+		return container.MountPoint{}, err
 	}
 
-	var mp []types.MountPoint
+	var mp []container.MountPoint
 	if err := json.Unmarshal([]byte(out), &mp); err != nil {
-		return types.MountPoint{}, err
+		return container.MountPoint{}, err
 	}
 
-	var m *types.MountPoint
+	var m *container.MountPoint
 	for _, c := range mp {
 		if c.Destination == destination {
 			m = &c
@@ -151,7 +152,7 @@ func inspectMountPoint(name, destination string) (types.MountPoint, error) {
 	}
 
 	if m == nil {
-		return types.MountPoint{}, errMountNotFound
+		return container.MountPoint{}, errMountNotFound
 	}
 
 	return *m, nil
@@ -399,7 +400,7 @@ func checkGoroutineCount(ctx context.Context, apiClient client.APIClient, expect
 				t.Log("Waiting for goroutines to stabilize")
 				first = false
 			}
-			return poll.Continue("exepcted %d goroutines, got %d", expected, n)
+			return poll.Continue("expected %d goroutines, got %d", expected, n)
 		}
 		return poll.Success()
 	}
@@ -439,7 +440,7 @@ func pollCheck(t *testing.T, f checkF, compare func(x interface{}) assert.BoolOr
 		default:
 			panic(fmt.Errorf("pollCheck: type %T not implemented", r))
 		}
-		return poll.Continue(comment)
+		return poll.Continue("%v", comment)
 	}
 }
 

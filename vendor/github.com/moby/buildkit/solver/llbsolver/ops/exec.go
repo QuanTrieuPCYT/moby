@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/platforms"
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/executor"
 	resourcestypes "github.com/moby/buildkit/executor/resources/types"
@@ -285,6 +285,11 @@ type dep struct {
 func (e *ExecOp) getMountDeps() ([]dep, error) {
 	deps := make([]dep, e.numInputs)
 	for _, m := range e.op.Mounts {
+		switch m.MountType {
+		case pb.MountType_SECRET, pb.MountType_SSH, pb.MountType_TMPFS:
+			continue
+		}
+
 		if m.Input == pb.Empty {
 			continue
 		}

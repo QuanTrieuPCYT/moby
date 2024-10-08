@@ -34,14 +34,15 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/containerd/containerd/pkg/userns"
 	"github.com/containerd/log"
 	"github.com/docker/docker/daemon/graphdriver"
-	"github.com/docker/docker/pkg/containerfs"
+	"github.com/docker/docker/daemon/internal/fstype"
+	"github.com/docker/docker/internal/containerfs"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers"
 	units "github.com/docker/go-units"
 	"github.com/moby/sys/mount"
+	"github.com/moby/sys/userns"
 	"github.com/opencontainers/selinux/go-selinux/label"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
@@ -68,12 +69,12 @@ func Init(home string, options []string, idMap idtools.IdentityMapping) (graphdr
 		testdir = filepath.Dir(testdir)
 	}
 
-	fsMagic, err := graphdriver.GetFSMagic(testdir)
+	fsMagic, err := fstype.GetFSMagic(testdir)
 	if err != nil {
 		return nil, err
 	}
 
-	if fsMagic != graphdriver.FsMagicBtrfs {
+	if fsMagic != fstype.FsMagicBtrfs {
 		return nil, graphdriver.ErrPrerequisites
 	}
 

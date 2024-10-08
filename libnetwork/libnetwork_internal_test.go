@@ -13,12 +13,15 @@ import (
 	"github.com/docker/docker/internal/testutils/netnsutils"
 	"github.com/docker/docker/libnetwork/config"
 	"github.com/docker/docker/libnetwork/driverapi"
+	"github.com/docker/docker/libnetwork/etchosts"
 	"github.com/docker/docker/libnetwork/ipams/defaultipam"
 	"github.com/docker/docker/libnetwork/ipamutils"
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/scope"
 	"github.com/docker/docker/libnetwork/types"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/skip"
 )
 
@@ -29,6 +32,7 @@ func TestNetworkMarshalling(t *testing.T) {
 		ipamType:    "default",
 		addrSpace:   "viola",
 		networkType: "bridge",
+		enableIPv4:  true,
 		enableIPv6:  true,
 		persist:     true,
 		configOnly:  true,
@@ -138,7 +142,7 @@ func TestNetworkMarshalling(t *testing.T) {
 	}
 
 	if n.name != nn.name || n.id != nn.id || n.networkType != nn.networkType || n.ipamType != nn.ipamType ||
-		n.addrSpace != nn.addrSpace || n.enableIPv6 != nn.enableIPv6 ||
+		n.addrSpace != nn.addrSpace || n.enableIPv4 != nn.enableIPv4 || n.enableIPv6 != nn.enableIPv6 ||
 		n.persist != nn.persist || !compareIpamConfList(n.ipamV4Config, nn.ipamV4Config) ||
 		!compareIpamInfoList(n.ipamV4Info, nn.ipamV4Info) || !compareIpamConfList(n.ipamV6Config, nn.ipamV6Config) ||
 		!compareIpamInfoList(n.ipamV6Info, nn.ipamV6Info) ||
@@ -316,13 +320,18 @@ func compareNwLists(a, b []*net.IPNet) bool {
 func TestAuxAddresses(t *testing.T) {
 	defer netnsutils.SetupTestOSContext(t)()
 
-	c, err := New(OptionBoltdbWithRandomDBFile(t))
+	c, err := New(config.OptionDataDir(t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Stop()
 
-	n := &Network{ipamType: defaultipam.DriverName, networkType: "bridge", ctrlr: c}
+	n := &Network{
+		enableIPv4:  true,
+		ipamType:    defaultipam.DriverName,
+		networkType: "bridge",
+		ctrlr:       c,
+	}
 
 	input := []struct {
 		masterPool   string
@@ -350,19 +359,106 @@ func TestAuxAddresses(t *testing.T) {
 	}
 }
 
+func TestUpdateSvcRecord(t *testing.T) {
+	skip.If(t, runtime.GOOS == "windows", "bridge driver and IPv6, only works on linux")
+
+	tests := []struct {
+		name       string
+		epName     string
+		addr4      string
+		addr6      string
+		expSvcRecs []etchosts.Record
+	}{
+		{
+			name:   "v4only",
+			epName: "ep4",
+			addr4:  "172.16.0.2/24",
+			expSvcRecs: []etchosts.Record{
+				{Hosts: "id-ep4", IP: "172.16.0.2"},
+			},
+		},
+		/* TODO(robmry) - add this test when the bridge driver understands v6-only
+		{
+			name:   "v6only",
+			epName: "ep6",
+			addr6:  "fde6:045d:b2aa::2/64",
+			expSvcRecs: []etchosts.Record{
+				{Hosts: "id-ep6", IP: "fde6:45d:b2aa::2"},
+			},
+		},
+		*/
+		{
+			name:   "dual-stack",
+			epName: "ep46",
+			addr4:  "172.16.1.2/24",
+			addr6:  "fd60:8677:5a4c::2/64",
+			expSvcRecs: []etchosts.Record{
+				{Hosts: "id-ep46", IP: "172.16.1.2"},
+				{Hosts: "id-ep46", IP: "fd60:8677:5a4c::2"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			defer netnsutils.SetupTestOSContext(t)()
+			ctrlr, err := New(config.OptionDataDir(t.TempDir()))
+			assert.NilError(t, err)
+			defer ctrlr.Stop()
+
+			var ipam4, ipam6 []*IpamConf
+			var ip4, ip6 net.IP
+			if tc.addr4 != "" {
+				var net4 *net.IPNet
+				ip4, net4, err = net.ParseCIDR(tc.addr4)
+				assert.NilError(t, err)
+				ipam4 = []*IpamConf{{PreferredPool: net4.String()}}
+			}
+			if tc.addr6 != "" {
+				var net6 *net.IPNet
+				ip6, net6, err = net.ParseCIDR(tc.addr6)
+				assert.NilError(t, err)
+				ipam6 = []*IpamConf{{PreferredPool: net6.String()}}
+			}
+			n, err := ctrlr.NewNetwork("bridge", "net1", "", nil,
+				NetworkOptionEnableIPv4(tc.addr4 != ""),
+				NetworkOptionEnableIPv6(tc.addr6 != ""),
+				NetworkOptionIpam(defaultipam.DriverName, "", ipam4, ipam6, nil),
+			)
+			assert.NilError(t, err)
+			ep, err := n.CreateEndpoint(context.Background(), tc.epName,
+				CreateOptionDNSNames([]string{tc.epName, "id-" + tc.epName}),
+				CreateOptionIpam(ip4, ip6, nil, nil),
+			)
+			assert.NilError(t, err)
+
+			n.updateSvcRecord(context.Background(), ep, true)
+			recs := n.getSvcRecords(ep)
+			assert.Check(t, is.DeepEqual(recs, tc.expSvcRecs))
+
+			n.updateSvcRecord(context.Background(), ep, false)
+			recs = n.getSvcRecords(ep)
+			assert.Check(t, is.Nil(recs))
+		})
+	}
+}
+
 func TestSRVServiceQuery(t *testing.T) {
 	skip.If(t, runtime.GOOS == "windows", "test only works on linux")
 
 	defer netnsutils.SetupTestOSContext(t)()
 
-	c, err := New(OptionBoltdbWithRandomDBFile(t),
+	c, err := New(config.OptionDataDir(t.TempDir()),
 		config.OptionDefaultAddressPoolConfig(ipamutils.GetLocalScopeDefaultNetworks()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Stop()
 
-	n, err := c.NewNetwork("bridge", "net1", "")
+	n, err := c.NewNetwork("bridge", "net1", "",
+		NetworkOptionEnableIPv4(true),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,22 +468,22 @@ func TestSRVServiceQuery(t *testing.T) {
 		}
 	}()
 
-	ep, err := n.CreateEndpoint("testep")
+	ep, err := n.CreateEndpoint(context.Background(), "testep")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	sb, err := c.NewSandbox("c1")
+	sb, err := c.NewSandbox(context.Background(), "c1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		if err := sb.Delete(); err != nil {
+		if err := sb.Delete(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
-	err = ep.Join(sb)
+	err = ep.Join(context.Background(), sb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,14 +550,16 @@ func TestServiceVIPReuse(t *testing.T) {
 
 	defer netnsutils.SetupTestOSContext(t)()
 
-	c, err := New(OptionBoltdbWithRandomDBFile(t),
+	c, err := New(config.OptionDataDir(t.TempDir()),
 		config.OptionDefaultAddressPoolConfig(ipamutils.GetLocalScopeDefaultNetworks()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Stop()
 
-	n, err := c.NewNetwork("bridge", "net1", "", nil)
+	n, err := c.NewNetwork("bridge", "net1", "", nil,
+		NetworkOptionEnableIPv4(true),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,22 +569,22 @@ func TestServiceVIPReuse(t *testing.T) {
 		}
 	}()
 
-	ep, err := n.CreateEndpoint("testep")
+	ep, err := n.CreateEndpoint(context.Background(), "testep")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	sb, err := c.NewSandbox("c1")
+	sb, err := c.NewSandbox(context.Background(), "c1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		if err := sb.Delete(); err != nil {
+		if err := sb.Delete(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
-	err = ep.Join(sb)
+	err = ep.Join(context.Background(), sb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +671,7 @@ func TestIpamReleaseOnNetDriverFailures(t *testing.T) {
 
 	defer netnsutils.SetupTestOSContext(t)()
 
-	c, err := New(OptionBoltdbWithRandomDBFile(t))
+	c, err := New(config.OptionDataDir(t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,11 +684,13 @@ func TestIpamReleaseOnNetDriverFailures(t *testing.T) {
 	// Test whether ipam state release is invoked  on network create failure from net driver
 	// by checking whether subsequent network creation requesting same gateway IP succeeds
 	ipamOpt := NetworkOptionIpam(defaultipam.DriverName, "", []*IpamConf{{PreferredPool: "10.34.0.0/16", Gateway: "10.34.255.254"}}, nil, nil)
-	if _, err := c.NewNetwork(badDriverName, "badnet1", "", ipamOpt); err == nil {
-		t.Fatalf("bad network driver should have failed network creation")
-	}
+	_, err = c.NewNetwork(badDriverName, "badnet1", "", ipamOpt)
+	assert.Check(t, is.ErrorContains(err, "I will not create any network"))
 
-	gnw, err := c.NewNetwork("bridge", "goodnet1", "", ipamOpt)
+	gnw, err := c.NewNetwork("bridge", "goodnet1", "",
+		NetworkOptionEnableIPv4(true),
+		ipamOpt,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +700,10 @@ func TestIpamReleaseOnNetDriverFailures(t *testing.T) {
 
 	// Now check whether ipam release works on endpoint creation failure
 	bd.failNetworkCreation = false
-	bnw, err := c.NewNetwork(badDriverName, "badnet2", "", ipamOpt)
+	bnw, err := c.NewNetwork(badDriverName, "badnet2", "",
+		NetworkOptionEnableIPv4(true),
+		ipamOpt,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,13 +713,16 @@ func TestIpamReleaseOnNetDriverFailures(t *testing.T) {
 		}
 	}()
 
-	if _, err := bnw.CreateEndpoint("ep0"); err == nil {
+	if _, err := bnw.CreateEndpoint(context.Background(), "ep0"); err == nil {
 		t.Fatalf("bad network driver should have failed endpoint creation")
 	}
 
 	// Now create good bridge network with different gateway
 	ipamOpt2 := NetworkOptionIpam(defaultipam.DriverName, "", []*IpamConf{{PreferredPool: "10.35.0.0/16", Gateway: "10.35.255.253"}}, nil, nil)
-	gnw, err = c.NewNetwork("bridge", "goodnet2", "", ipamOpt2)
+	gnw, err = c.NewNetwork("bridge", "goodnet2", "",
+		NetworkOptionEnableIPv4(true),
+		ipamOpt2,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,11 +732,11 @@ func TestIpamReleaseOnNetDriverFailures(t *testing.T) {
 		}
 	}()
 
-	ep, err := gnw.CreateEndpoint("ep1")
+	ep, err := gnw.CreateEndpoint(context.Background(), "ep1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ep.Delete(false) //nolint:errcheck
+	defer ep.Delete(context.Background(), false) //nolint:errcheck
 
 	expectedIP, _ := types.ParseCIDR("10.35.0.1/16")
 	if !types.CompareIPNet(ep.Info().Iface().Address(), expectedIP) {
@@ -661,7 +767,7 @@ func (b *badDriver) DeleteNetwork(nid string) error {
 	return nil
 }
 
-func (b *badDriver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo, options map[string]interface{}) error {
+func (b *badDriver) CreateEndpoint(_ context.Context, nid, eid string, ifInfo driverapi.InterfaceInfo, options map[string]interface{}) error {
 	return fmt.Errorf("I will not create any endpoint")
 }
 
@@ -673,7 +779,7 @@ func (b *badDriver) EndpointOperInfo(nid, eid string) (map[string]interface{}, e
 	return nil, nil
 }
 
-func (b *badDriver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
+func (b *badDriver) Join(_ context.Context, nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
 	return fmt.Errorf("I will not allow any join")
 }
 
@@ -689,7 +795,7 @@ func (b *badDriver) IsBuiltIn() bool {
 	return false
 }
 
-func (b *badDriver) ProgramExternalConnectivity(nid, eid string, options map[string]interface{}) error {
+func (b *badDriver) ProgramExternalConnectivity(_ context.Context, nid, eid string, options map[string]interface{}) error {
 	return nil
 }
 

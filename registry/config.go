@@ -184,7 +184,7 @@ func (config *serviceConfig) loadMirrors(mirrors []string) error {
 func (config *serviceConfig) loadInsecureRegistries(registries []string) error {
 	// Localhost is by default considered as an insecure registry. This is a
 	// stop-gap for people who are running a private registry on localhost.
-	registries = append(registries, "127.0.0.0/8")
+	registries = append(registries, "::1/128", "127.0.0.0/8")
 
 	var (
 		insecureRegistryCIDRs = make([]*registry.NetIPNet, 0)
@@ -359,7 +359,7 @@ func hasScheme(reposName string) bool {
 }
 
 func validateHostPort(s string) error {
-	// Split host and port, and in case s can not be splitted, assume host only
+	// Split host and port, and in case s can not be split, assume host only
 	host, port, err := net.SplitHostPort(s)
 	if err != nil {
 		host = s

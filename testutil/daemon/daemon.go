@@ -12,10 +12,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/container"
@@ -621,6 +623,11 @@ func (d *Daemon) Kill() error {
 		return err
 	}
 
+	_, err := d.cmd.Process.Wait()
+	if err != nil && !errors.Is(err, syscall.ECHILD) {
+		return err
+	}
+
 	if d.pidFile != "" {
 		_ = os.Remove(d.pidFile)
 	}
@@ -830,14 +837,14 @@ func (d *Daemon) LoadBusybox(ctx context.Context, t testing.TB) {
 	assert.NilError(t, err, "[%s] failed to create client", d.id)
 	defer clientHost.Close()
 
-	reader, err := clientHost.ImageSave(ctx, []string{"busybox:latest"})
+	reader, err := clientHost.ImageSave(ctx, []string{"busybox:latest"}, image.SaveOptions{})
 	assert.NilError(t, err, "[%s] failed to download busybox", d.id)
 	defer reader.Close()
 
 	c := d.NewClientT(t)
 	defer c.Close()
 
-	resp, err := c.ImageLoad(ctx, reader, true)
+	resp, err := c.ImageLoad(ctx, reader, image.LoadOptions{Quiet: true})
 	assert.NilError(t, err, "[%s] failed to load busybox", d.id)
 	defer resp.Body.Close()
 }

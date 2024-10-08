@@ -6,6 +6,7 @@ linters:
     - gosec
     - gosimple
     - govet
+    - forbidigo
     - importas
     - ineffassign
     - misspell
@@ -31,6 +32,18 @@ linters-settings:
       - "true"    # some tests use this as expected output
       - "false"   # some tests use this as expected output
       - "root"    # for tests using "ls" output with files owned by "root:root"
+  forbidigo:
+    forbid:
+      - pkg: ^sync/atomic$
+        p: ^atomic\.(Add|CompareAndSwap|Load|Store|Swap).
+        msg: Go 1.19 atomic types should be used instead.
+      - pkg: github.com/vishvananda/netlink$
+        p: ^netlink\.(Handle\.)?(AddrList|BridgeVlanList|ChainList|ClassList|ConntrackTableList|ConntrackDeleteFilter$|ConntrackDeleteFilters|DevLinkGetDeviceList|DevLinkGetAllPortList|DevlinkGetDeviceParams|FilterList|FouList|GenlFamilyList|GTPPDPList|LinkByName|LinkByAlias|LinkList|LinkSubscribeWithOptions|NeighList$|NeighProxyList|NeighListExecute|NeighSubscribeWithOptions|LinkGetProtinfo|QdiscList|RdmaLinkList|RdmaLinkByName|RdmaLinkDel|RouteList|RouteListFilteredIter|RuleListFiltered$|RouteSubscribeWithOptions|RuleList$|RuleListFiltered|SocketGet|SocketDiagTCPInfo|SocketDiagTCP|SocketDiagUDPInfo|SocketDiagUDP|UnixSocketDiagInfo|UnixSocketDiag|VDPAGetDevConfigList|VDPAGetDevList|VDPAGetMGMTDevList|XfrmPolicyList|XfrmStateList)
+        msg: Use internal nlwrap package for EINTR handling.
+      - pkg: github.com/docker/docker/internal/nlwrap$
+        p: ^nlwrap.Handle.(BridgeVlanList|ChainList|ClassList|ConntrackDeleteFilter$|DevLinkGetDeviceList|DevLinkGetAllPortList|DevlinkGetDeviceParams|FilterList|FouList|GenlFamilyList|GTPPDPList|LinkByAlias|LinkSubscribeWithOptions|NeighList$|NeighProxyList|NeighListExecute|NeighSubscribeWithOptions|LinkGetProtinfo|QdiscList|RdmaLinkList|RdmaLinkByName|RdmaLinkDel|RouteListFilteredIter|RuleListFiltered$|RouteSubscribeWithOptions|RuleList$|RuleListFiltered|SocketGet|SocketDiagTCPInfo|SocketDiagTCP|SocketDiagUDPInfo|SocketDiagUDP|UnixSocketDiagInfo|UnixSocketDiag|VDPAGetDevConfigList|VDPAGetDevList|VDPAGetMGMTDevList)
+        msg: Add a wrapper to nlwrap.Handle for EINTR handling and update the list in .golangci.yml.
+    analyze-types: true
   importas:
     # Do not allow unaliased imports of aliased packages.
     no-unaliased: true
@@ -45,6 +58,11 @@ linters-settings:
 
   govet:
     check-shadowing: false
+
+  gosec:
+    excludes:
+      - G115 # FIXME temporarily suppress 'G115: integer overflow conversion': it produces many hits, some of which may be false positives, and need to be looked at; see https://github.com/moby/moby/issues/48358
+
   depguard:
     rules:
       main:
@@ -57,10 +75,14 @@ linters-settings:
             desc: Use "gotest.tools/v3/assert" instead
           - pkg: "github.com/stretchr/testify/suite"
             desc: Do not use
-          - pkg: github.com/containerd/containerd/errdefs
+          - pkg: "github.com/containerd/containerd/errdefs"
             desc: The errdefs package has moved to a separate module, https://github.com/containerd/errdefs
-          - pkg: github.com/containerd/containerd/log
+          - pkg: "github.com/containerd/containerd/log"
             desc: The logs package has moved to a separate module, https://github.com/containerd/log
+          - pkg: "github.com/containerd/containerd/pkg/userns"
+            desc: Use github.com/moby/sys/userns instead.
+          - pkg: "github.com/opencontainers/runc/libcontainer/userns"
+            desc: Use github.com/moby/sys/userns instead.
   revive:
     rules:
       # FIXME make sure all packages have a description. Currently, there's many packages without.
@@ -78,7 +100,7 @@ issues:
     # (unlike the "include" option), the "exclude" option does not take exclusion
     # ID's.
     #
-    # These exclusion patterns are copied from the default excluses at:
+    # These exclusion patterns are copied from the default excludes at:
     # https://github.com/golangci/golangci-lint/blob/v1.46.2/pkg/config/issues.go#L10-L104
 
     # EXC0001
@@ -131,6 +153,16 @@ issues:
         - revive
     # FIXME temporarily suppress these (see https://github.com/gotestyourself/gotest.tools/issues/272)
     - text: "SA1019: (assert|cmp|is)\\.ErrorType is deprecated"
+      linters:
+        - staticcheck
+
+    - text: "ineffectual assignment to ctx"
+      source: "ctx[, ].*=.*\\(ctx[,)]"
+      linters:
+        - ineffassign
+
+    - text: "SA4006: this value of `ctx` is never used"
+      source: "ctx[, ].*=.*\\(ctx[,)]"
       linters:
         - staticcheck
 

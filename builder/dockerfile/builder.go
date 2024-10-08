@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/container"
@@ -228,7 +228,7 @@ func emitImageID(aux *streamformatter.AuxFormatter, state *dispatchState) error 
 
 func processMetaArg(meta instructions.ArgCommand, shlex *shell.Lex, args *BuildArgs) error {
 	// shell.Lex currently only support the concatenated string format
-	envs := convertMapToEnvList(args.GetAllAllowed())
+	envs := shell.EnvsFromSlice(convertMapToEnvList(args.GetAllAllowed()))
 	if err := meta.Expand(func(word string) (string, error) {
 		newword, _, err := shlex.ProcessWord(word, envs)
 		return newword, err
@@ -379,5 +379,16 @@ func convertMapToEnvList(m map[string]string) []string {
 	for k, v := range m {
 		result = append(result, k+"="+v)
 	}
+	return result
+}
+
+// convertKVStringsToMap converts ["key=value"] to {"key":"value"}
+func convertKVStringsToMap(values []string) map[string]string {
+	result := make(map[string]string, len(values))
+	for _, value := range values {
+		k, v, _ := strings.Cut(value, "=")
+		result[k] = v
+	}
+
 	return result
 }

@@ -35,6 +35,7 @@ import (
 	"github.com/moby/buildkit/solver/llbsolver/proc"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/bklog"
+	"github.com/moby/buildkit/util/db"
 	"github.com/moby/buildkit/util/imageutil"
 	"github.com/moby/buildkit/util/leaseutil"
 	"github.com/moby/buildkit/util/throttle"
@@ -43,7 +44,6 @@ import (
 	"github.com/moby/buildkit/worker"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
-	"go.etcd.io/bbolt"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	tracev1 "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"golang.org/x/sync/errgroup"
@@ -62,7 +62,7 @@ type Opt struct {
 	ResolveCacheImporterFuncs map[string]remotecache.ResolveCacheImporterFunc
 	Entitlements              []string
 	TraceCollector            sdktrace.SpanExporter
-	HistoryDB                 *bbolt.DB
+	HistoryDB                 db.DB
 	CacheStore                *bboltcachestorage.Store
 	LeaseManager              *leaseutil.Manager
 	ContentStore              *containerdsnapshot.Store
@@ -283,18 +283,23 @@ func (c *Controller) ListenBuildHistory(req *controlapi.BuildHistoryRequest, srv
 }
 
 func (c *Controller) UpdateBuildHistory(ctx context.Context, req *controlapi.UpdateBuildHistoryRequest) (*controlapi.UpdateBuildHistoryResponse, error) {
-	if !req.Delete {
-		err := c.history.UpdateRef(ctx, req.Ref, func(r *controlapi.BuildHistoryRecord) error {
-			if req.Pinned == r.Pinned {
-				return nil
-			}
-			r.Pinned = req.Pinned
-			return nil
-		})
+	if req.Delete {
+		err := c.history.Delete(ctx, req.Ref)
 		return &controlapi.UpdateBuildHistoryResponse{}, err
 	}
 
-	err := c.history.Delete(ctx, req.Ref)
+	if req.Finalize {
+		err := c.history.Finalize(ctx, req.Ref)
+		return &controlapi.UpdateBuildHistoryResponse{}, err
+	}
+
+	err := c.history.UpdateRef(ctx, req.Ref, func(r *controlapi.BuildHistoryRecord) error {
+		if req.Pinned == r.Pinned {
+			return nil
+		}
+		r.Pinned = req.Pinned
+		return nil
+	})
 	return &controlapi.UpdateBuildHistoryResponse{}, err
 }
 
@@ -372,6 +377,7 @@ func (c *Controller) Solve(ctx context.Context, req *controlapi.SolveRequest) (*
 		if err != nil {
 			return nil, err
 		}
+		bklog.G(ctx).Debugf("resolve exporter %s with %v", ex.Type, ex.Attrs)
 		expi, err := exp.Resolve(ctx, i, ex.Attrs)
 		if err != nil {
 			return nil, err

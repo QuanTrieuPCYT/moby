@@ -30,7 +30,7 @@ type ContainerRmConfig struct {
 
 // ContainerAttachConfig holds the streams to use when connecting to a container to view logs.
 type ContainerAttachConfig struct {
-	GetStreams func(multiplexed bool) (io.ReadCloser, io.Writer, io.Writer, error)
+	GetStreams func(multiplexed bool, cancel func()) (io.ReadCloser, io.Writer, io.Writer, error)
 	UseStdin   bool
 	UseStdout  bool
 	UseStderr  bool
@@ -141,8 +141,10 @@ type CreateImageConfig struct {
 // from the backend.
 type GetImageOpts struct {
 	Platform *ocispec.Platform
-	Details  bool
 }
+
+// ImageInspectOpts holds parameters to inspect an image.
+type ImageInspectOpts struct{}
 
 // CommitConfig is the configuration for creating an image as part of a build.
 type CommitConfig struct {

@@ -1,5 +1,5 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.19
+//go:build go1.21
 
 // Package daemon exposes the functions that occur on the host server
 // that the Docker daemon is running.
@@ -27,12 +27,10 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/defaults"
 	"github.com/containerd/containerd/pkg/dialer"
-	"github.com/containerd/containerd/pkg/userns"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/log"
 	"github.com/distribution/reference"
 	dist "github.com/docker/distribution"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	imagetypes "github.com/docker/docker/api/types/image"
@@ -58,7 +56,6 @@ import (
 	"github.com/docker/docker/dockerversion"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
-	"github.com/docker/docker/internal/compatcontext"
 	"github.com/docker/docker/layer"
 	libcontainerdtypes "github.com/docker/docker/libcontainerd/types"
 	"github.com/docker/docker/libnetwork"
@@ -76,13 +73,13 @@ import (
 	pluginexec "github.com/docker/docker/plugin/executor/containerd"
 	refstore "github.com/docker/docker/reference"
 	"github.com/docker/docker/registry"
-	"github.com/docker/docker/runconfig"
 	volumesservice "github.com/docker/docker/volume/service"
 	"github.com/moby/buildkit/util/grpcerrors"
 	"github.com/moby/buildkit/util/resolver"
 	resolverconfig "github.com/moby/buildkit/util/resolver/config"
 	"github.com/moby/buildkit/util/tracing"
 	"github.com/moby/locker"
+	"github.com/moby/sys/userns"
 	"github.com/pkg/errors"
 	"go.etcd.io/bbolt"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -138,12 +135,12 @@ type Daemon struct {
 	seccompProfile     []byte
 	seccompProfilePath string
 
-	usageContainers singleflight.Group[struct{}, []*types.Container]
+	usageContainers singleflight.Group[struct{}, []*containertypes.Summary]
 	usageImages     singleflight.Group[struct{}, []*imagetypes.Summary]
 	usageVolumes    singleflight.Group[struct{}, []*volume.Volume]
 	usageLayer      singleflight.Group[struct{}, int64]
 
-	pruneRunning int32
+	pruneRunning atomic.Bool
 	hosts        map[string]bool // hosts stores the addresses the daemon is listening on
 	startupDone  chan struct{}
 
@@ -269,7 +266,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 	}
 
 	// parallelLimit is the maximum number of parallel startup jobs that we
-	// allow (this is the limited used for all startup semaphores). The multipler
+	// allow (this is the limited used for all startup semaphores). The multiplier
 	// (128) was chosen after some fairly significant benchmarking -- don't change
 	// it unless you've tested it significantly (this value is adjusted if
 	// RLIMIT_NOFILE is small to avoid EMFILE).
@@ -392,7 +389,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 				//
 				// TODO(aker): remove this migration code once the next LTM version of MCR is released.
 				if c.HostConfig.NetworkMode.IsDefault() {
-					c.HostConfig.NetworkMode = runconfig.DefaultDaemonNetworkMode()
+					c.HostConfig.NetworkMode = network.DefaultNetwork
 					if nw, ok := c.NetworkSettings.Networks[networktypes.NetworkDefault]; ok {
 						c.NetworkSettings.Networks[c.HostConfig.NetworkMode.NetworkName()] = nw
 						delete(c.NetworkSettings.Networks, networktypes.NetworkDefault)
@@ -473,7 +470,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 						c.Paused = false
 						daemon.setStateCounter(c)
 						daemon.initHealthMonitor(c)
-						if err := c.CheckpointTo(daemon.containersReplica); err != nil {
+						if err := c.CheckpointTo(context.TODO(), daemon.containersReplica); err != nil {
 							baseLogger.WithError(err).Error("failed to update paused container state")
 						}
 						c.Unlock()
@@ -497,7 +494,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 					}
 					c.SetStopped(&ces)
 					daemon.Cleanup(context.TODO(), c)
-					if err := c.CheckpointTo(daemon.containersReplica); err != nil {
+					if err := c.CheckpointTo(context.TODO(), daemon.containersReplica); err != nil {
 						baseLogger.WithError(err).Error("failed to update stopped container state")
 					}
 					c.Unlock()
@@ -564,7 +561,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 				// state and leave further processing up to them.
 				c.RemovalInProgress = false
 				c.Dead = true
-				if err := c.CheckpointTo(daemon.containersReplica); err != nil {
+				if err := c.CheckpointTo(context.TODO(), daemon.containersReplica); err != nil {
 					baseLogger.WithError(err).Error("failed to update RemovalInProgress container state")
 				} else {
 					baseLogger.Debugf("reset RemovalInProgress state for container")
@@ -582,6 +579,24 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 	// needs to know if there's active sandboxes (running containers).
 	if err = daemon.initNetworkController(&cfg.Config, activeSandboxes); err != nil {
 		return fmt.Errorf("Error initializing network controller: %v", err)
+	}
+
+	for _, c := range containers {
+		sb, err := daemon.netController.SandboxByID(c.NetworkSettings.SandboxID)
+		if err != nil {
+			// If this container's sandbox doesn't exist anymore, that's because
+			// the netController gc'ed it during its initialization. In that case,
+			// we need to clear all the network-related state carried by that
+			// container.
+			daemon.releaseNetwork(context.WithoutCancel(context.TODO()), c)
+			continue
+		}
+		// If port-mapping failed during live-restore of a container, perhaps because
+		// a host port that was previously mapped to a container is now in-use by some
+		// other process - ports will not be mapped for the restored container, but it
+		// will be running. Replace the restored mappings in NetworkSettings with the
+		// current state so that the problem is visible in 'inspect'.
+		c.NetworkSettings.Ports = getPortMapInfo(sb)
 	}
 
 	// Now that all the containers are registered, register the links
@@ -697,7 +712,7 @@ func (daemon *Daemon) RestartSwarmContainers() {
 
 func (daemon *Daemon) restartSwarmContainers(ctx context.Context, cfg *configStore) {
 	// parallelLimit is the maximum number of parallel startup jobs that we
-	// allow (this is the limited used for all startup semaphores). The multipler
+	// allow (this is the limited used for all startup semaphores). The multiplier
 	// (128) was chosen after some fairly significant benchmarking -- don't change
 	// it unless you've tested it significantly (this value is adjusted if
 	// RLIMIT_NOFILE is small to avoid EMFILE).
@@ -834,14 +849,14 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	// Do we have a disabled network?
 	config.DisableBridge = isBridgeNetworkDisabled(config)
 
+	// Setup the resolv.conf
+	setupResolvConf(config)
+
 	idMapping, err := setupRemappedRoot(config)
 	if err != nil {
 		return nil, err
 	}
 	rootIDs := idMapping.RootPair()
-	if err := setMayDetachMounts(); err != nil {
-		log.G(ctx).WithError(err).Warn("Could not set may_detach_mounts kernel parameter")
-	}
 
 	// set up the tmpDir to use a canonical path
 	tmp, err := prepareTempDir(config.Root)
@@ -924,7 +939,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 
 	// ensureDefaultAppArmorProfile does nothing if apparmor is disabled
 	if err := ensureDefaultAppArmorProfile(); err != nil {
-		log.G(ctx).Errorf(err.Error())
+		log.G(ctx).WithError(err).Error("Failed to ensure default apparmor profile is loaded")
 	}
 
 	daemonRepo := filepath.Join(cfgStore.Root, "containers")
@@ -1135,7 +1150,6 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 			GraphDriver:               driverName,
 			GraphDriverOptions:        cfgStore.GraphOptions,
 			IDMapping:                 idMapping,
-			PluginGetter:              d.PluginStore,
 			ExperimentalEnabled:       cfgStore.Experimental,
 		})
 		if err != nil {
@@ -1271,7 +1285,7 @@ func (daemon *Daemon) waitForStartupDone() {
 }
 
 func (daemon *Daemon) shutdownContainer(c *container.Container) error {
-	ctx := compatcontext.WithoutCancel(context.TODO())
+	ctx := context.WithoutCancel(context.TODO())
 
 	// If container failed to exit in stopTimeout seconds of SIGTERM, then using the force
 	if err := daemon.containerStop(ctx, c, containertypes.StopOptions{}); err != nil {
@@ -1469,13 +1483,11 @@ func isBridgeNetworkDisabled(conf *config.Config) bool {
 }
 
 func (daemon *Daemon) networkOptions(conf *config.Config, pg plugingetter.PluginGetter, hostID string, activeSandboxes map[string]interface{}) ([]nwconfig.Option, error) {
-	dd := runconfig.DefaultDaemonNetworkMode()
-
 	options := []nwconfig.Option{
 		nwconfig.OptionDataDir(conf.Root),
 		nwconfig.OptionExecRoot(conf.GetExecRoot()),
-		nwconfig.OptionDefaultDriver(string(dd)),
-		nwconfig.OptionDefaultNetwork(dd.NetworkName()),
+		nwconfig.OptionDefaultDriver(network.DefaultNetwork),
+		nwconfig.OptionDefaultNetwork(network.DefaultNetwork),
 		nwconfig.OptionLabels(conf.Labels),
 		nwconfig.OptionNetworkControlPlaneMTU(conf.NetworkControlPlaneMTU),
 		driverOptions(conf),
@@ -1604,7 +1616,7 @@ func RemapContainerdNamespaces(config *config.Config) (ns string, pluginNs strin
 func (daemon *Daemon) checkpointAndSave(container *container.Container) error {
 	container.Lock()
 	defer container.Unlock()
-	if err := container.CheckpointTo(daemon.containersReplica); err != nil {
+	if err := container.CheckpointTo(context.TODO(), daemon.containersReplica); err != nil {
 		return fmt.Errorf("Error saving container state: %v", err)
 	}
 	return nil

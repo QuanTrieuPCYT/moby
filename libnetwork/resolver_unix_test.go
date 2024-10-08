@@ -3,6 +3,7 @@
 package libnetwork
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -15,14 +16,14 @@ import (
 // test only works on linux
 func TestDNSIPQuery(t *testing.T) {
 	defer netnsutils.SetupTestOSContext(t)()
-	c, err := New(OptionBoltdbWithRandomDBFile(t),
+	c, err := New(config.OptionDataDir(t.TempDir()),
 		config.OptionDefaultAddressPoolConfig(ipamutils.GetLocalScopeDefaultNetworks()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Stop()
 
-	n, err := c.NewNetwork("bridge", "dtnet1", "", nil)
+	n, err := c.NewNetwork("bridge", "dtnet1", "", NetworkOptionEnableIPv4(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,34 +33,34 @@ func TestDNSIPQuery(t *testing.T) {
 		}
 	}()
 
-	ep, err := n.CreateEndpoint("testep")
+	ep, err := n.CreateEndpoint(context.Background(), "testep")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	sb, err := c.NewSandbox("c1")
+	sb, err := c.NewSandbox(context.Background(), "c1")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
-		if err := sb.Delete(); err != nil {
+		if err := sb.Delete(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
 	// we need the endpoint only to populate ep_list for the sandbox as part of resolve_name
 	// it is not set as a target for name resolution and does not serve any other purpose
-	err = ep.Join(sb)
+	err = ep.Join(context.Background(), sb)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// add service records which are used to resolve names. These are the real targets for the DNS querries
+	// add service records which are used to resolve names. These are the real targets for the DNS queries
 	n.addSvcRecords("ep1", "name1", "svc1", net.ParseIP("192.168.0.1"), net.IP{}, true, "test")
 
 	w := new(tstwriter)
-	// the unit tests right now will focus on non-proxyed DNS requests
+	// the unit tests right now will focus on non-proxied DNS requests
 	r := NewResolver(resolverIPSandbox, false, sb)
 
 	// test name1's IP is resolved correctly with the default A type query
@@ -113,14 +114,14 @@ func TestDNSProxyServFail(t *testing.T) {
 	osctx := netnsutils.SetupTestOSContextEx(t)
 	defer osctx.Cleanup(t)
 
-	c, err := New(OptionBoltdbWithRandomDBFile(t),
+	c, err := New(config.OptionDataDir(t.TempDir()),
 		config.OptionDefaultAddressPoolConfig(ipamutils.GetLocalScopeDefaultNetworks()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Stop()
 
-	n, err := c.NewNetwork("bridge", "dtnet2", "", nil)
+	n, err := c.NewNetwork("bridge", "dtnet2", "", NetworkOptionEnableIPv4(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,13 +131,13 @@ func TestDNSProxyServFail(t *testing.T) {
 		}
 	}()
 
-	sb, err := c.NewSandbox("c1")
+	sb, err := c.NewSandbox(context.Background(), "c1")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	defer func() {
-		if err := sb.Delete(); err != nil {
+		if err := sb.Delete(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}()
@@ -176,7 +177,7 @@ func TestDNSProxyServFail(t *testing.T) {
 	r.SetExtServers(localDNSEntries)
 	r.serveDNS(w, q)
 	if nRequests != 2 {
-		t.Fatalf("Expected 2 DNS querries. Found: %d", nRequests)
+		t.Fatalf("Expected 2 DNS queries. Found: %d", nRequests)
 	}
 	t.Logf("Expected number of DNS requests generated")
 }

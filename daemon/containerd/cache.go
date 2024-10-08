@@ -44,7 +44,7 @@ func (c cacheAdaptor) Get(id image.ID) (*image.Image, error) {
 		return nil, fmt.Errorf("resolveImage: %w", err)
 	}
 
-	var errFound = errors.New("success")
+	errFound := errors.New("success")
 	err = c.is.walkImageManifests(ctx, c8dImg, func(img *ImageManifest) error {
 		desc, err := img.Config(ctx)
 		if err != nil {
@@ -84,7 +84,7 @@ func (c cacheAdaptor) Get(id image.ID) (*image.Image, error) {
 			}
 
 			var config container.Config
-			if err := readConfig(ctx, c.is.content, configDesc, &config); err != nil {
+			if err := readJSON(ctx, c.is.content, configDesc, &config); err != nil {
 				if !errdefs.IsNotFound(err) {
 					log.G(ctx).WithFields(log.Fields{
 						"configDigest": dgst,

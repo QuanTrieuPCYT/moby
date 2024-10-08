@@ -9,10 +9,8 @@ import (
 	"github.com/docker/docker/api/types/network"
 	types "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/daemon/cluster/convert"
-	internalnetwork "github.com/docker/docker/daemon/network"
+	networkSettings "github.com/docker/docker/daemon/network"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/internal/compatcontext"
-	"github.com/docker/docker/runconfig"
 	swarmapi "github.com/moby/swarmkit/v2/api"
 	"github.com/pkg/errors"
 )
@@ -40,7 +38,7 @@ func (c *Cluster) GetNetworks(filter filters.Args) ([]network.Inspect, error) {
 	}
 	filterPredefinedNetworks(&list)
 
-	return internalnetwork.FilterNetworks(list, filter)
+	return networkSettings.FilterNetworks(list, filter)
 }
 
 func filterPredefinedNetworks(networks *[]network.Inspect) {
@@ -224,7 +222,7 @@ func (c *Cluster) AttachNetwork(target string, containerID string, addresses []s
 	log.G(ctx).Debugf("Successfully attached to network %s with task id %s", target, taskID)
 
 	release := func() {
-		ctx := compatcontext.WithoutCancel(ctx)
+		ctx := context.WithoutCancel(ctx)
 		ctx, cancel := context.WithTimeout(ctx, swarmRequestTimeout)
 		defer cancel()
 		if err := agent.ResourceAllocator().DetachNetwork(ctx, taskID); err != nil {
@@ -270,7 +268,7 @@ func (c *Cluster) DetachNetwork(target string, containerID string) error {
 
 // CreateNetwork creates a new cluster managed network.
 func (c *Cluster) CreateNetwork(s network.CreateRequest) (string, error) {
-	if runconfig.IsPreDefinedNetwork(s.Name) {
+	if networkSettings.IsPredefined(s.Name) {
 		err := notAllowedError(fmt.Sprintf("%s is a pre-defined network and cannot be created", s.Name))
 		return "", errors.WithStack(err)
 	}
@@ -315,7 +313,7 @@ func (c *Cluster) populateNetworkID(ctx context.Context, client swarmapi.Control
 		apiNetwork, err := getNetwork(ctx, client, nw.Target)
 		if err != nil {
 			ln, _ := c.config.Backend.FindNetwork(nw.Target)
-			if ln != nil && runconfig.IsPreDefinedNetwork(ln.Name()) {
+			if ln != nil && networkSettings.IsPredefined(ln.Name()) {
 				// Need to retrieve the corresponding predefined swarm network
 				// and use its id for the request.
 				apiNetwork, err = getNetwork(ctx, client, ln.Name())

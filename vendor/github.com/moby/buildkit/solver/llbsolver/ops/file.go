@@ -169,7 +169,7 @@ func (f *fileOp) Exec(ctx context.Context, g session.Group, inputs []solver.Resu
 
 	backend, err := file.NewFileOpBackend(getReadUserFn(f.w))
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 
 	fs := NewFileOpSolver(f.w, backend, f.refManager)
@@ -354,7 +354,7 @@ func (s *FileOpSolver) Solve(ctx context.Context, inputs []fileoptypes.Ref, acti
 	defer func() {
 		for _, in := range s.ins {
 			if in.ref == nil && in.mount != nil {
-				in.mount.Release(context.TODO())
+				in.mount.Release(context.WithoutCancel(ctx))
 			}
 		}
 	}()
@@ -432,6 +432,7 @@ func (s *FileOpSolver) getInput(ctx context.Context, idx int, inputs []fileoptyp
 
 		defer func() {
 			if err != nil && inpMount != nil {
+				ctx := context.WithoutCancel(ctx)
 				inputRes := make([]solver.Result, len(inputs))
 				for i, input := range inputs {
 					inputRes[i] = worker.NewWorkerRefResult(input.(cache.ImmutableRef), s.w)
@@ -458,8 +459,9 @@ func (s *FileOpSolver) getInput(ctx context.Context, idx int, inputs []fileoptyp
 
 				err = errdefs.WithExecErrorWithContext(ctx, err, inputRes, outputRes)
 			}
+			ctx := context.WithoutCancel(ctx)
 			for _, m := range toRelease {
-				m.Release(context.TODO())
+				m.Release(ctx)
 			}
 		}()
 
@@ -472,7 +474,7 @@ func (s *FileOpSolver) getInput(ctx context.Context, idx int, inputs []fileoptyp
 				if inp.ref != nil {
 					m, err := s.r.Prepare(ctx, inp.ref, false, g)
 					if err != nil {
-						return err
+						return errors.WithStack(err)
 					}
 					inpMount = m
 					return nil
@@ -491,7 +493,7 @@ func (s *FileOpSolver) getInput(ctx context.Context, idx int, inputs []fileoptyp
 				if inp.ref != nil {
 					m, err := s.r.Prepare(ctx, inp.ref, true, g)
 					if err != nil {
-						return err
+						return errors.WithStack(err)
 					}
 					inpMountSecondary = m
 					toRelease = append(toRelease, m)
@@ -519,7 +521,7 @@ func (s *FileOpSolver) getInput(ctx context.Context, idx int, inputs []fileoptyp
 				if inp.ref != nil {
 					mm, err := s.r.Prepare(ctx, inp.ref, true, g)
 					if err != nil {
-						return nil, err
+						return nil, errors.WithStack(err)
 					}
 					toRelease = append(toRelease, mm)
 					m = mm
@@ -570,7 +572,7 @@ func (s *FileOpSolver) getInput(ctx context.Context, idx int, inputs []fileoptyp
 		if inpMount == nil {
 			m, err := s.r.Prepare(ctx, nil, false, g)
 			if err != nil {
-				return input{}, err
+				return input{}, errors.WithStack(err)
 			}
 			inpMount = m
 		}

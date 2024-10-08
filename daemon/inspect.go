@@ -1,5 +1,5 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.19
+//go:build go1.21
 
 package daemon // import "github.com/docker/docker/daemon"
 
@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	networktypes "github.com/docker/docker/api/types/network"
@@ -49,7 +48,7 @@ func (daemon *Daemon) ContainerInspect(ctx context.Context, name string, size bo
 
 // ContainerInspectCurrent returns low-level information about a
 // container in a most recent api version.
-func (daemon *Daemon) ContainerInspectCurrent(ctx context.Context, name string, size bool) (*types.ContainerJSON, error) {
+func (daemon *Daemon) ContainerInspectCurrent(ctx context.Context, name string, size bool) (*containertypes.InspectResponse, error) {
 	ctr, err := daemon.GetContainer(name)
 	if err != nil {
 		return nil, err
@@ -72,8 +71,8 @@ func (daemon *Daemon) ContainerInspectCurrent(ctx context.Context, name string, 
 	}
 
 	mountPoints := ctr.GetMountPoints()
-	networkSettings := &types.NetworkSettings{
-		NetworkSettingsBase: types.NetworkSettingsBase{
+	networkSettings := &containertypes.NetworkSettings{
+		NetworkSettingsBase: containertypes.NetworkSettingsBase{
 			Bridge:                 ctr.NetworkSettings.Bridge,
 			SandboxID:              ctr.NetworkSettings.SandboxID,
 			SandboxKey:             ctr.NetworkSettings.SandboxKey,
@@ -83,7 +82,7 @@ func (daemon *Daemon) ContainerInspectCurrent(ctx context.Context, name string, 
 			SecondaryIPAddresses:   ctr.NetworkSettings.SecondaryIPAddresses,
 			SecondaryIPv6Addresses: ctr.NetworkSettings.SecondaryIPv6Addresses,
 		},
-		DefaultNetworkSettings: daemon.getDefaultNetworkSettings(ctr.NetworkSettings.Networks),
+		DefaultNetworkSettings: getDefaultNetworkSettings(ctr.NetworkSettings.Networks),
 		Networks:               apiNetworks,
 	}
 
@@ -104,7 +103,7 @@ func (daemon *Daemon) ContainerInspectCurrent(ctx context.Context, name string, 
 		base.SizeRootFs = &sizeRootFs
 	}
 
-	return &types.ContainerJSON{
+	return &containertypes.InspectResponse{
 		ContainerJSONBase: base,
 		Mounts:            mountPoints,
 		Config:            ctr.Config,
@@ -112,7 +111,7 @@ func (daemon *Daemon) ContainerInspectCurrent(ctx context.Context, name string, 
 	}, nil
 }
 
-func (daemon *Daemon) getInspectData(daemonCfg *config.Config, container *container.Container) (*types.ContainerJSONBase, error) {
+func (daemon *Daemon) getInspectData(daemonCfg *config.Config, container *container.Container) (*containertypes.ContainerJSONBase, error) {
 	// make a copy to play with
 	hostConfig := *container.HostConfig
 
@@ -137,16 +136,16 @@ func (daemon *Daemon) getInspectData(daemonCfg *config.Config, container *contai
 		}
 	}
 
-	var containerHealth *types.Health
+	var containerHealth *containertypes.Health
 	if container.State.Health != nil {
-		containerHealth = &types.Health{
+		containerHealth = &containertypes.Health{
 			Status:        container.State.Health.Status(),
 			FailingStreak: container.State.Health.FailingStreak,
-			Log:           append([]*types.HealthcheckResult{}, container.State.Health.Log...),
+			Log:           append([]*containertypes.HealthcheckResult{}, container.State.Health.Log...),
 		}
 	}
 
-	containerState := &types.ContainerState{
+	containerState := &containertypes.State{
 		Status:     container.State.StateString(),
 		Running:    container.State.Running,
 		Paused:     container.State.Paused,
@@ -161,7 +160,7 @@ func (daemon *Daemon) getInspectData(daemonCfg *config.Config, container *contai
 		Health:     containerHealth,
 	}
 
-	contJSONBase := &types.ContainerJSONBase{
+	contJSONBase := &containertypes.ContainerJSONBase{
 		ID:           container.ID,
 		Created:      container.Created.Format(time.RFC3339Nano),
 		Path:         container.Path,
@@ -247,18 +246,20 @@ func (daemon *Daemon) ContainerExecInspect(id string) (*backend.ExecInspect, err
 
 // getDefaultNetworkSettings creates the deprecated structure that holds the information
 // about the bridge network for a container.
-func (daemon *Daemon) getDefaultNetworkSettings(networks map[string]*network.EndpointSettings) types.DefaultNetworkSettings {
-	var settings types.DefaultNetworkSettings
-
-	if defaultNetwork, ok := networks[networktypes.NetworkBridge]; ok && defaultNetwork.EndpointSettings != nil {
-		settings.EndpointID = defaultNetwork.EndpointID
-		settings.Gateway = defaultNetwork.Gateway
-		settings.GlobalIPv6Address = defaultNetwork.GlobalIPv6Address
-		settings.GlobalIPv6PrefixLen = defaultNetwork.GlobalIPv6PrefixLen
-		settings.IPAddress = defaultNetwork.IPAddress
-		settings.IPPrefixLen = defaultNetwork.IPPrefixLen
-		settings.IPv6Gateway = defaultNetwork.IPv6Gateway
-		settings.MacAddress = defaultNetwork.MacAddress
+func getDefaultNetworkSettings(networks map[string]*network.EndpointSettings) containertypes.DefaultNetworkSettings {
+	nw, ok := networks[networktypes.NetworkBridge]
+	if !ok || nw.EndpointSettings == nil {
+		return containertypes.DefaultNetworkSettings{}
 	}
-	return settings
+
+	return containertypes.DefaultNetworkSettings{
+		EndpointID:          nw.EndpointSettings.EndpointID,
+		Gateway:             nw.EndpointSettings.Gateway,
+		GlobalIPv6Address:   nw.EndpointSettings.GlobalIPv6Address,
+		GlobalIPv6PrefixLen: nw.EndpointSettings.GlobalIPv6PrefixLen,
+		IPAddress:           nw.EndpointSettings.IPAddress,
+		IPPrefixLen:         nw.EndpointSettings.IPPrefixLen,
+		IPv6Gateway:         nw.EndpointSettings.IPv6Gateway,
+		MacAddress:          nw.EndpointSettings.MacAddress,
+	}
 }

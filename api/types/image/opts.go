@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/docker/docker/api/types/filters"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // ImportSource holds source information for ImageImport
@@ -37,13 +38,29 @@ type PullOptions struct {
 	// authentication header value in base64 encoded format, or an error if the
 	// privilege request fails.
 	//
-	// Also see [github.com/docker/docker/api/types.RequestPrivilegeFunc].
+	// For details, refer to [github.com/docker/docker/api/types/registry.RequestAuthConfig].
 	PrivilegeFunc func(context.Context) (string, error)
 	Platform      string
 }
 
 // PushOptions holds information to push images.
-type PushOptions PullOptions
+type PushOptions struct {
+	All          bool
+	RegistryAuth string // RegistryAuth is the base64 encoded credentials for the registry
+
+	// PrivilegeFunc is a function that clients can supply to retry operations
+	// after getting an authorization error. This function returns the registry
+	// authentication header value in base64 encoded format, or an error if the
+	// privilege request fails.
+	//
+	// For details, refer to [github.com/docker/docker/api/types/registry.RequestAuthConfig].
+	PrivilegeFunc func(context.Context) (string, error)
+
+	// Platform is an optional field that selects a specific platform to push
+	// when the image is a multi-platform image.
+	// Using this will only push a single platform-specific manifest.
+	Platform *ocispec.Platform `json:",omitempty"`
+}
 
 // ListOptions holds parameters to list images with.
 type ListOptions struct {
@@ -59,10 +76,34 @@ type ListOptions struct {
 
 	// ContainerCount indicates whether container count should be computed.
 	ContainerCount bool
+
+	// Manifests indicates whether the image manifests should be returned.
+	Manifests bool
 }
 
 // RemoveOptions holds parameters to remove images.
 type RemoveOptions struct {
 	Force         bool
 	PruneChildren bool
+}
+
+// HistoryOptions holds parameters to get image history.
+type HistoryOptions struct {
+	// Platform from the manifest list to use for history.
+	Platform *ocispec.Platform
+}
+
+// LoadOptions holds parameters to load images.
+type LoadOptions struct {
+	// Quiet suppresses progress output
+	Quiet bool
+
+	// Platform is a specific platform to load when the image is a multi-platform
+	Platform *ocispec.Platform
+}
+
+// SaveOptions holds parameters to save images.
+type SaveOptions struct {
+	// Platform is a specific platform to save if the image is a multi-platform image.
+	Platform *ocispec.Platform
 }

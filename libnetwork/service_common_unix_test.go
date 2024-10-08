@@ -14,7 +14,7 @@ import (
 
 func TestCleanupServiceDiscovery(t *testing.T) {
 	defer netnsutils.SetupTestOSContext(t)()
-	c, err := New(OptionBoltdbWithRandomDBFile(t),
+	c, err := New(config.OptionDataDir(t.TempDir()),
 		config.OptionDefaultAddressPoolConfig(ipamutils.GetLocalScopeDefaultNetworks()))
 	assert.NilError(t, err)
 	defer c.Stop()
@@ -24,11 +24,11 @@ func TestCleanupServiceDiscovery(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	n1, err := c.NewNetwork("bridge", "net1", "", nil)
+	n1, err := c.NewNetwork("bridge", "net1", "", NetworkOptionEnableIPv4(true))
 	assert.NilError(t, err)
 	defer cleanup(n1)
 
-	n2, err := c.NewNetwork("bridge", "net2", "", nil)
+	n2, err := c.NewNetwork("bridge", "net2", "", NetworkOptionEnableIPv4(true))
 	assert.NilError(t, err)
 	defer cleanup(n2)
 

@@ -658,7 +658,7 @@ func TestServiceNetworkUpdate(t *testing.T) {
 	err = na.Allocate(n2)
 	assert.Check(t, err)
 
-	// Attach a network to a service spec nd allocate a service
+	// Attach a network to a service spec and allocate a service
 	s := &api.Service{
 		ID: "testID1",
 		Spec: api.ServiceSpec{
@@ -718,7 +718,6 @@ func TestServiceNetworkUpdate(t *testing.T) {
 
 	assert.Check(t, na.IsServiceAllocated(s))
 	assert.Check(t, is.Len(s.Endpoint.VirtualIPs, 1))
-
 }
 
 type mockIpam struct {

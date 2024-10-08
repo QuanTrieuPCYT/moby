@@ -11,6 +11,14 @@ func WithDriver(driver string) func(*network.CreateOptions) {
 	}
 }
 
+// WithIPv4 enables/disables IPv4 on the network
+func WithIPv4(enable bool) func(*network.CreateOptions) {
+	return func(n *network.CreateOptions) {
+		enableIPv4 := enable
+		n.EnableIPv4 = &enableIPv4
+	}
+}
+
 // WithIPv6 Enables IPv6 on the network
 func WithIPv6() func(*network.CreateOptions) {
 	return func(n *network.CreateOptions) {
@@ -41,6 +49,19 @@ func WithMacvlan(parent string) func(*network.CreateOptions) {
 			n.Options = map[string]string{
 				"parent": parent,
 			}
+		}
+	}
+}
+
+// WithMacvlanPassthru sets the network as macvlan with the specified parent in passthru mode
+func WithMacvlanPassthru(parent string) func(options *network.CreateOptions) {
+	return func(n *network.CreateOptions) {
+		n.Driver = "macvlan"
+		n.Options = map[string]string{
+			"macvlan_mode": "passthru",
+		}
+		if parent != "" {
+			n.Options["parent"] = parent
 		}
 	}
 }

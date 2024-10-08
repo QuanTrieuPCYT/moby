@@ -23,22 +23,23 @@ type Backend interface {
 
 type imageBackend interface {
 	ImageDelete(ctx context.Context, imageRef string, force, prune bool) ([]image.DeleteResponse, error)
-	ImageHistory(ctx context.Context, imageName string) ([]*image.HistoryResponseItem, error)
+	ImageHistory(ctx context.Context, imageName string, platform *ocispec.Platform) ([]*image.HistoryResponseItem, error)
 	Images(ctx context.Context, opts image.ListOptions) ([]*image.Summary, error)
 	GetImage(ctx context.Context, refOrID string, options backend.GetImageOpts) (*dockerimage.Image, error)
+	ImageInspect(ctx context.Context, refOrID string, options backend.ImageInspectOpts) (*image.InspectResponse, error)
 	TagImage(ctx context.Context, id dockerimage.ID, newRef reference.Named) error
 	ImagesPrune(ctx context.Context, pruneFilters filters.Args) (*image.PruneReport, error)
 }
 
 type importExportBackend interface {
-	LoadImage(ctx context.Context, inTar io.ReadCloser, outStream io.Writer, quiet bool) error
+	LoadImage(ctx context.Context, inTar io.ReadCloser, platform *ocispec.Platform, outStream io.Writer, quiet bool) error
 	ImportImage(ctx context.Context, ref reference.Named, platform *ocispec.Platform, msg string, layerReader io.Reader, changes []string) (dockerimage.ID, error)
-	ExportImage(ctx context.Context, names []string, outStream io.Writer) error
+	ExportImage(ctx context.Context, names []string, platform *ocispec.Platform, outStream io.Writer) error
 }
 
 type registryBackend interface {
 	PullImage(ctx context.Context, ref reference.Named, platform *ocispec.Platform, metaHeaders map[string][]string, authConfig *registry.AuthConfig, outStream io.Writer) error
-	PushImage(ctx context.Context, ref reference.Named, metaHeaders map[string][]string, authConfig *registry.AuthConfig, outStream io.Writer) error
+	PushImage(ctx context.Context, ref reference.Named, platform *ocispec.Platform, metaHeaders map[string][]string, authConfig *registry.AuthConfig, outStream io.Writer) error
 }
 
 type Searcher interface {

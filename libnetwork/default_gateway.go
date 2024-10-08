@@ -71,21 +71,21 @@ func (sb *Sandbox) setupDefaultGW() error {
 		createOptions = append(createOptions, epOption)
 	}
 
-	newEp, err := n.CreateEndpoint(gwName, createOptions...)
+	newEp, err := n.CreateEndpoint(context.TODO(), gwName, createOptions...)
 	if err != nil {
 		return fmt.Errorf("container %s: endpoint create on GW Network failed: %v", sb.containerID, err)
 	}
 
 	defer func() {
 		if err != nil {
-			if err2 := newEp.Delete(true); err2 != nil {
+			if err2 := newEp.Delete(context.WithoutCancel(context.TODO()), true); err2 != nil {
 				log.G(context.TODO()).Warnf("Failed to remove gw endpoint for container %s after failing to join the gateway network: %v",
 					sb.containerID, err2)
 			}
 		}
 	}()
 
-	if err = newEp.sbJoin(sb); err != nil {
+	if err = newEp.sbJoin(context.TODO(), sb); err != nil {
 		return fmt.Errorf("container %s: endpoint join on GW Network failed: %v", sb.containerID, err)
 	}
 
@@ -99,10 +99,10 @@ func (sb *Sandbox) clearDefaultGW() error {
 	if ep = sb.getEndpointInGWNetwork(); ep == nil {
 		return nil
 	}
-	if err := ep.sbLeave(sb, false); err != nil {
+	if err := ep.sbLeave(context.TODO(), sb, false); err != nil {
 		return fmt.Errorf("container %s: endpoint leaving GW Network failed: %v", sb.containerID, err)
 	}
-	if err := ep.Delete(false); err != nil {
+	if err := ep.Delete(context.TODO(), false); err != nil {
 		return fmt.Errorf("container %s: deleting endpoint on GW Network failed: %v", sb.containerID, err)
 	}
 	return nil
@@ -129,8 +129,10 @@ func (sb *Sandbox) needDefaultGW() bool {
 		if ep.joinInfo != nil && ep.joinInfo.disableGatewayService {
 			continue
 		}
-		// TODO v6 needs to be handled.
 		if len(ep.Gateway()) > 0 {
+			return false
+		}
+		if len(ep.GatewayIPv6()) > 0 {
 			return false
 		}
 		for _, r := range ep.StaticRoutes() {

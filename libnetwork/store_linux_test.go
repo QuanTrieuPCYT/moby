@@ -1,22 +1,22 @@
 package libnetwork
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"testing"
 
+	"github.com/docker/docker/libnetwork/config"
 	store "github.com/docker/docker/libnetwork/internal/kvstore"
 )
 
 func TestBoltdbBackend(t *testing.T) {
 	tmpPath := filepath.Join(t.TempDir(), "boltdb.db")
-	testLocalBackend(t, "boltdb", tmpPath, &store.Config{
-		Bucket: "testBackend",
-	})
+	testLocalBackend(t, tmpPath, "testBackend")
 }
 
 func TestNoPersist(t *testing.T) {
-	configOption := OptionBoltdbWithRandomDBFile(t)
+	configOption := config.OptionDataDir(t.TempDir())
 	testController, err := New(configOption)
 	if err != nil {
 		t.Fatalf("Error creating new controller: %v", err)
@@ -26,7 +26,7 @@ func TestNoPersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf(`Error creating default "host" network: %v`, err)
 	}
-	ep, err := nw.CreateEndpoint("newendpoint", []EndpointOption{}...)
+	ep, err := nw.CreateEndpoint(context.Background(), "newendpoint", []EndpointOption{}...)
 	if err != nil {
 		t.Fatalf("Error creating endpoint: %v", err)
 	}

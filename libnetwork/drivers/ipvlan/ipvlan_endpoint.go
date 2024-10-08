@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/containerd/log"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/libnetwork/driverapi"
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/ns"
@@ -14,13 +15,13 @@ import (
 )
 
 // CreateEndpoint assigns the mac, ip and endpoint id for the new container
-func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo, epOptions map[string]interface{}) error {
+func (d *driver) CreateEndpoint(ctx context.Context, nid, eid string, ifInfo driverapi.InterfaceInfo, epOptions map[string]interface{}) error {
 	if err := validateID(nid, eid); err != nil {
 		return err
 	}
 	n, err := d.getNetwork(nid)
 	if err != nil {
-		return fmt.Errorf("network id %q not found", nid)
+		return errdefs.System(fmt.Errorf("network id %q not found", nid))
 	}
 	if ifInfo.MacAddress() != nil {
 		return fmt.Errorf("ipvlan interfaces do not support custom mac address assignment")
@@ -31,14 +32,11 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 		addr:   ifInfo.Address(),
 		addrv6: ifInfo.AddressIPv6(),
 	}
-	if ep.addr == nil {
-		return fmt.Errorf("create endpoint was not passed an IP address")
-	}
 	// disallow port mapping -p
 	if opt, ok := epOptions[netlabel.PortMap]; ok {
 		if _, ok := opt.([]types.PortBinding); ok {
 			if len(opt.([]types.PortBinding)) > 0 {
-				log.G(context.TODO()).Warnf("ipvlan driver does not support port mappings")
+				log.G(ctx).Warnf("ipvlan driver does not support port mappings")
 			}
 		}
 	}
@@ -46,7 +44,7 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	if opt, ok := epOptions[netlabel.ExposedPorts]; ok {
 		if _, ok := opt.([]types.TransportPort); ok {
 			if len(opt.([]types.TransportPort)) > 0 {
-				log.G(context.TODO()).Warnf("ipvlan driver does not support port exposures")
+				log.G(ctx).Warnf("ipvlan driver does not support port exposures")
 			}
 		}
 	}

@@ -4,14 +4,16 @@ set -eu
 swagger generate model -f api/swagger.yaml \
 	-t api -m types --skip-validator -C api/swagger-gen.yaml \
 	-n ErrorResponse \
-	-n GraphDriverData \
 	-n IdResponse \
 	-n Plugin \
 	-n PluginDevice \
 	-n PluginMount \
 	-n PluginEnv \
-	-n PluginInterfaceType \
-	-n Port
+	-n PluginInterfaceType
+
+swagger generate model -f api/swagger.yaml \
+	-t api -m types/storage --skip-validator -C api/swagger-gen.yaml \
+	-n DriverData
 
 swagger generate model -f api/swagger.yaml \
 	-t api -m types/container --skip-validator -C api/swagger-gen.yaml \
@@ -19,12 +21,14 @@ swagger generate model -f api/swagger.yaml \
 	-n ContainerWaitResponse \
 	-n ContainerWaitExitError \
 	-n ChangeType \
-	-n FilesystemChange
+	-n FilesystemChange \
+	-n Port
 
 swagger generate model -f api/swagger.yaml \
 	-t api -m types/image --skip-validator -C api/swagger-gen.yaml \
-	-n ImageDeleteResponseItem \
-	-n ImageSummary
+	-n ImageDeleteResponseItem
+#-n ImageSummary TODO: Restore when go-swagger is updated
+# See https://github.com/moby/moby/pull/47526#discussion_r1551800022
 
 swagger generate model -f api/swagger.yaml \
 	-t api -m types/network --skip-validator -C api/swagger-gen.yaml \

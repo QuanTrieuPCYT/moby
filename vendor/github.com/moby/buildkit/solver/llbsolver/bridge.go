@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/platforms"
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/moby/buildkit/cache/remotecache"
 	"github.com/moby/buildkit/client"
@@ -144,12 +144,8 @@ func (b *llbBridge) loadResult(ctx context.Context, def *pb.Definition, cacheImp
 	}
 
 	if len(dpc.ids) > 0 {
-		ids := make([]string, 0, len(dpc.ids))
-		for id := range dpc.ids {
-			ids = append(ids, id)
-		}
 		if err := b.eachWorker(func(w worker.Worker) error {
-			return w.PruneCacheMounts(ctx, ids)
+			return w.PruneCacheMounts(ctx, dpc.ids)
 		}); err != nil {
 			return nil, err
 		}

@@ -81,7 +81,6 @@ func (s *systemRouter) getInfo(ctx context.Context, w http.ResponseWriter, r *ht
 				nameOnly = append(nameOnly, so.Name)
 			}
 			info.SecurityOptions = nameOnly
-			info.ExecutionDriver = "<not supported>" //nolint:staticcheck // ignore SA1019 (ExecutionDriver is deprecated)
 		}
 		if versions.LessThan(version, "1.39") {
 			if info.KernelVersion == "" {
@@ -97,6 +96,16 @@ func (s *systemRouter) getInfo(ctx context.Context, w http.ResponseWriter, r *ht
 				info.Runtimes[k] = system.RuntimeWithStatus{Runtime: rt.Runtime}
 			}
 		}
+		if versions.LessThan(version, "1.46") {
+			// Containerd field introduced in API v1.46.
+			info.Containerd = nil
+		}
+
+		// TODO(thaJeztah): Expected commits are deprecated, and should no longer be set in API 1.49.
+		info.ContainerdCommit.Expected = info.ContainerdCommit.ID //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.49.
+		info.RuncCommit.Expected = info.RuncCommit.ID             //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.49.
+		info.InitCommit.Expected = info.InitCommit.ID             //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.49.
+
 		if versions.GreaterThanOrEqualTo(version, "1.42") {
 			info.KernelMemory = false
 		}
@@ -273,7 +282,18 @@ func (s *systemRouter) getEvents(ctx context.Context, w http.ResponseWriter, r *
 	buffered, l := s.backend.SubscribeToEvents(since, until, ef)
 	defer s.backend.UnsubscribeFromEvents(l)
 
+	shouldSkip := func(ev events.Message) bool { return false }
+	if versions.LessThan(httputils.VersionFromContext(ctx), "1.46") {
+		// Image create events were added in API 1.46
+		shouldSkip = func(ev events.Message) bool {
+			return ev.Type == "image" && ev.Action == "create"
+		}
+	}
+
 	for _, ev := range buffered {
+		if shouldSkip(ev) {
+			continue
+		}
 		if err := enc.Encode(ev); err != nil {
 			return err
 		}
@@ -289,6 +309,9 @@ func (s *systemRouter) getEvents(ctx context.Context, w http.ResponseWriter, r *
 			jev, ok := ev.(events.Message)
 			if !ok {
 				log.G(ctx).Warnf("unexpected event message: %q", ev)
+				continue
+			}
+			if shouldSkip(jev) {
 				continue
 			}
 			if err := enc.Encode(jev); err != nil {
